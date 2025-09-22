@@ -1,0 +1,9 @@
+{
+  "files.encoding": "utf8",
+  "files.autoGuessEncoding": true,
+
+  "cSpell.language": "en,ru",
+  "cSpell.allowCompoundWords": true,
+
+  "locale": "ru"
+}
