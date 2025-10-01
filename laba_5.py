@@ -20,7 +20,6 @@ def run_and_show(conn, sql_create, sql_select, title):
         for r in rows:
             print(r)
 
-# 1. Все доступные рейсы
 def task1(conn):
     run_and_show(conn,
         """CREATE OR REPLACE VIEW available_flights AS
@@ -29,7 +28,6 @@ def task1(conn):
         "Задание 1"
     )
 
-# 2. Средние цены на билеты по типам самолётов
 def task2(conn):
     run_and_show(conn,
         """CREATE TEMP VIEW airlines_avg_price AS
@@ -41,7 +39,6 @@ def task2(conn):
         "Задание 2"
     )
 
-# 3. Рейсы в диапазоне цен
 def task3(conn, min_price, max_price):
     run_and_show(conn,
         f"""CREATE TEMP VIEW flights_in_price AS
@@ -53,7 +50,6 @@ def task3(conn, min_price, max_price):
         "Задание 3"
     )
 
-# 4. Доступные места на рейсе
 def task4(conn, flight_id):
     run_and_show(conn,
         f"""CREATE TEMP VIEW seats_available AS
@@ -70,7 +66,6 @@ def task4(conn, flight_id):
         "Задание 4"
     )
 
-# 5. Пассажиры с бронями на следующий месяц
 def task5(conn):
     run_and_show(conn,
         """CREATE TEMP VIEW passengers_next_month AS
@@ -84,7 +79,6 @@ def task5(conn):
         "Задание 5"
     )
 
-# 6. Мат. представление рейсов по сезонам
 def task6(conn):
     run_and_show(conn,
         """CREATE MATERIALIZED VIEW flights_by_season AS
@@ -101,7 +95,6 @@ def task6(conn):
         "Задание 6"
     )
 
-# 7. Рейсы с заполненностью < 50%
 def task7(conn):
     run_and_show(conn,
         """CREATE TEMP VIEW low_occupancy AS
@@ -120,7 +113,6 @@ def task7(conn):
         "Задание 7"
     )
 
-# 8. Отменённые рейсы по типам самолётов
 def task8(conn):
     run_and_show(conn,
         """CREATE TEMP VIEW airlines_cancelled AS
@@ -132,7 +124,6 @@ def task8(conn):
         "Задание 8"
     )
 
-# 9. Мат. представление рейсов по дням недели
 def task9(conn):
     run_and_show(conn,
         """CREATE MATERIALIZED VIEW flights_by_weekday AS
@@ -143,7 +134,6 @@ def task9(conn):
         "Задание 9"
     )
 
-# 10. Пассажиры с бронями на ближайшие 7 дней
 def task10(conn):
     run_and_show(conn,
         """CREATE TEMP VIEW passengers_next_week AS
@@ -156,7 +146,6 @@ def task10(conn):
         "Задание 10"
     )
 
-# 11. Среднее время полёта по маршрутам
 def task11(conn):
     run_and_show(conn,
         """CREATE MATERIALIZED VIEW avg_flight_time AS
@@ -169,7 +158,6 @@ def task11(conn):
         "Задание 11"
     )
 
-# 12. Самые загруженные аэропорты
 def task12(conn):
     run_and_show(conn,
         """CREATE MATERIALIZED VIEW busiest_airports AS
@@ -181,7 +169,6 @@ def task12(conn):
         "Задание 12"
     )
 
-# 13. Пять рекурсивных представлений
 def task13(conn):
     with conn.cursor() as cur:
         cur.execute("""CREATE OR REPLACE RECURSIVE VIEW nums_1_10(n) AS

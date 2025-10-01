@@ -14,7 +14,6 @@ def run_sql(sql, fetch=False):
             return cur.fetchall()
         conn.commit()
 
-# ---------- Таблица логов ----------
 run_sql("""
 CREATE TABLE IF NOT EXISTS bookings.logs (
     id SERIAL PRIMARY KEY,
@@ -26,7 +25,6 @@ CREATE TABLE IF NOT EXISTS bookings.logs (
 );
 """)
 
-# ---------- Функции и триггеры ----------
 triggers_sql = """
 
 -- 1.1 Проверка мест
