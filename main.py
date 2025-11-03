@@ -43,31 +43,38 @@ def setup_role(role):
         "admin": getattr(main, "tabAdmin", None),
     }
 
-    for t in tabs.values():
-        if t:
-            idx = main.twMain.indexOf(t)
-            if idx != -1:
-                main.twMain.setTabVisible(idx, False)
+    # Спрячем все вкладки и подготовим список, который нужно показать
+    for widget in tabs.values():
+        if widget:
+            index = main.twMain.indexOf(widget)
+            if index != -1:
+                main.twMain.setTabVisible(index, False)
+
+    def show_tabs(keys, title):
+        first_visible = None
+        for key in keys:
+            widget = tabs.get(key)
+            if not widget:
+                continue
+            index = main.twMain.indexOf(widget)
+            if index == -1:
+                continue
+            main.twMain.setTabVisible(index, True)
+            if first_visible is None:
+                first_visible = widget
+
+        if first_visible is not None:
+            main.twMain.setCurrentWidget(first_visible)
+        main.setWindowTitle(title)
 
     if role == "Client":
-        for key in ("catalog", "book"):
-            t = tabs[key]
-            if t:
-                main.twMain.setTabVisible(main.twMain.indexOf(t), True)
-        main.setWindowTitle("Smart-SPA — Клиент")
+        show_tabs(("catalog", "book"), "Smart-SPA — Клиент")
 
     elif role == "Salon":
-        for key in ("salon", "catalog"):
-            t = tabs[key]
-            if t:
-                main.twMain.setTabVisible(main.twMain.indexOf(t), True)
-        main.setWindowTitle("Smart-SPA — Салон")
+        show_tabs(("salon", "catalog"), "Smart-SPA — Салон")
 
     elif role == "Admin":
-        t = tabs["admin"]
-        if t:
-            main.twMain.setTabVisible(main.twMain.indexOf(t), True)
-        main.setWindowTitle("Smart-SPA — Администратор")
+        show_tabs(("admin",), "Smart-SPA — Администратор")
 
 login.btnLogin.clicked.connect(on_login)
 
