@@ -67,14 +67,25 @@ def setup_role(role):
             main.twMain.setCurrentWidget(first_visible)
         main.setWindowTitle(title)
 
-    if role == "Client":
-        show_tabs(("catalog", "book"), "Smart-SPA — Клиент")
+    role_key = role.strip().casefold()
+    role_configs = {
+        "client": (("catalog", "book"), "Smart-SPA — Клиент"),
+        "клиент": (("catalog", "book"), "Smart-SPA — Клиент"),
+        "salon": (("salon", "catalog"), "Smart-SPA — Салон"),
+        "салон": (("salon", "catalog"), "Smart-SPA — Салон"),
+        "admin": (("admin",), "Smart-SPA — Администратор"),
+        "админ": (("admin",), "Smart-SPA — Администратор"),
+        "администратор": (("admin",), "Smart-SPA — Администратор"),
+    }
 
-    elif role == "Salon":
-        show_tabs(("salon", "catalog"), "Smart-SPA — Салон")
+    config = role_configs.get(role_key)
+    if config:
+        show_tabs(*config)
+        return
 
-    elif role == "Admin":
-        show_tabs(("admin",), "Smart-SPA — Администратор")
+    # Если роль неизвестна, покажем все доступные вкладки, чтобы окно не оставалось пустым
+    available_tabs = tuple(key for key, widget in tabs.items() if widget)
+    show_tabs(available_tabs, f"Smart-SPA — {role or 'Пользователь'}")
 
 login.btnLogin.clicked.connect(on_login)
 
