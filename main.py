@@ -2,7 +2,12 @@ import sys
 import os
 from decimal import Decimal
 
-from PySide6.QtWidgets import QApplication, QMessageBox, QTableWidgetItem
+from PySide6.QtWidgets import (
+    QApplication,
+    QMessageBox,
+    QTableWidgetItem,
+    QTableWidget,
+)
 from PySide6.QtUiTools import QUiLoader
 from PySide6.QtCore import QFile, QDate, QTime, QDateTime, Qt
 from PySide6.QtSql import QSqlQuery
@@ -61,10 +66,16 @@ def populate_table(table, headers, rows, row_payloads=None):
     if table is None:
         return
 
+    table.blockSignals(True)
+    table.setSortingEnabled(False)
     table.clear()
     table.setRowCount(len(rows))
     table.setColumnCount(len(headers))
     table.setHorizontalHeaderLabels(headers)
+
+    if isinstance(table, QTableWidget):
+        table.setSelectionBehavior(QTableWidget.SelectRows)
+        table.setSelectionMode(QTableWidget.SingleSelection)
 
     for row_idx, row in enumerate(rows):
         for col_idx, cell in enumerate(row):
@@ -83,6 +94,8 @@ def populate_table(table, headers, rows, row_payloads=None):
     if header is not None:
         header.setStretchLastSection(True)
     table.resizeColumnsToContents()
+    table.setSortingEnabled(True)
+    table.blockSignals(False)
 
 
 def show_db_error(query, context):
@@ -286,7 +299,7 @@ def find_next_available_slot(salon_id):
     return None
 
 
-def on_apply_filter():
+def read_catalog_filters_from_ui():
     combo = getattr(main, "cbCity", None)
     search_edit = getattr(main, "leSearch", None)
 
@@ -300,6 +313,11 @@ def on_apply_filter():
     if search_edit is not None:
         search_text = search_edit.text().strip()
 
+    return city_value, search_text
+
+
+def on_apply_filter():
+    city_value, search_text = read_catalog_filters_from_ui()
     catalog_filter_state["city"] = city_value
     catalog_filter_state["search"] = search_text
 
@@ -546,6 +564,12 @@ main = load_ui("ui/MainWindow.ui")
 login.btnLogin.clicked.connect(on_login)
 main.btnApply.clicked.connect(on_apply_filter)
 main.btnBookNow.clicked.connect(on_book_now)
+
+if hasattr(main, "leSearch"):
+    main.leSearch.returnPressed.connect(on_apply_filter)
+
+if hasattr(main, "cbCity"):
+    main.cbCity.currentIndexChanged.connect(lambda *_: on_apply_filter())
 
 login.show()
 sys.exit(app.exec())
