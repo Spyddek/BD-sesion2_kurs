@@ -27,7 +27,7 @@
     </widget>
    </item>
    <item row="0" column="1">
-    <widget class="QLineEdit" name="UserName_2">
+    <widget class="QLineEdit" name="leUsername">
      <property name="font">
       <font>
        <pointsize>14</pointsize>
@@ -48,7 +48,7 @@
     </widget>
    </item>
    <item row="1" column="1">
-    <widget class="QLineEdit" name="Password_2">
+    <widget class="QLineEdit" name="lePassword">
      <property name="font">
       <font>
        <pointsize>14</pointsize>
@@ -60,7 +60,7 @@
     </widget>
    </item>
    <item row="2" column="1">
-    <widget class="QComboBox" name="comboBox">
+    <widget class="QComboBox" name="cbRole">
      <property name="font">
       <font>
        <pointsize>14</pointsize>
