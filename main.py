@@ -564,8 +564,129 @@ login = load_ui("ui/LoginWindow.ui")
 main = load_ui("ui/MainWindow.ui")
 
 login.btnLogin.clicked.connect(on_login)
+def on_cancel_booking():
+    if current_user is None:
+        QMessageBox.information(
+            main,
+            "Отмена записи",
+            "Чтобы отменить запись, сначала войдите в систему.",
+        )
+        return
+
+    table = getattr(main, "tblBookings", None)
+    if table is None or table.rowCount() == 0:
+        QMessageBox.information(main, "Отмена записи", "У вас пока нет записей.")
+        return
+
+    selection_model = table.selectionModel()
+    if selection_model is None or not selection_model.hasSelection():
+        QMessageBox.information(
+            main,
+            "Отмена записи",
+            "Выберите запись в таблице, которую нужно отменить.",
+        )
+        return
+
+    selected_rows = selection_model.selectedRows()
+    if not selected_rows:
+        QMessageBox.information(
+            main,
+            "Отмена записи",
+            "Выберите запись в таблице, которую нужно отменить.",
+        )
+        return
+
+    row = selected_rows[0].row()
+    id_item = table.item(row, 0)
+    if id_item is None:
+        QMessageBox.warning(main, "Отмена записи", "Не удалось определить выбранную запись.")
+        return
+
+    try:
+        appointment_id = int(id_item.text())
+    except (TypeError, ValueError):
+        QMessageBox.warning(main, "Отмена записи", "Некорректный идентификатор записи.")
+        return
+
+    status_query = execute_select(
+        "SELECT status FROM appointments WHERE id = ?", [appointment_id], "Проверка статуса записи"
+    )
+    if status_query is None or not status_query.next():
+        QMessageBox.warning(main, "Отмена записи", "Запись не найдена в базе данных.")
+        return
+
+    current_status = status_query.value("status")
+    if current_status not in {"ожидает подтверждения", "подтверждена"}:
+        QMessageBox.information(
+            main,
+            "Отмена записи",
+            "Отменить можно только будущие или ожидающие подтверждения записи.",
+        )
+        return
+
+    confirm = QMessageBox.question(
+        main,
+        "Подтверждение отмены",
+        "Отменить выбранную запись и освободить слот?",
+        QMessageBox.Yes | QMessageBox.No,
+        QMessageBox.No,
+    )
+    if confirm != QMessageBox.Yes:
+        return
+
+    query = QSqlQuery()
+    query.prepare("SELECT cancel_appointment(?)")
+    query.addBindValue(appointment_id)
+
+    if not query.exec():
+        show_db_error(query, "Отмена записи")
+        return
+
+    load_bookings(current_user.get("id"))
+    load_catalog()
+
+    QMessageBox.information(main, "Запись отменена", "Выбранная запись успешно отменена.")
+
+
+def on_add_booking():
+    if current_user is None or current_role != "client":
+        QMessageBox.information(
+            main,
+            "Добавление записи",
+            "Добавлять записи может только авторизованный клиент.",
+        )
+        return
+
+    catalog_tab = getattr(main, "tabCatalog", None)
+    if catalog_tab is not None:
+        main.twMain.setCurrentWidget(catalog_tab)
+
+    catalog_table = getattr(main, "tblCatalog", None)
+    if catalog_table is None or catalog_table.rowCount() == 0:
+        QMessageBox.information(main, "Добавление записи", "Каталог пока пуст, выбирать нечего.")
+        return
+
+    selection_model = catalog_table.selectionModel()
+    if selection_model is None or not selection_model.hasSelection():
+        QMessageBox.information(
+            main,
+            "Добавление записи",
+            "Выберите услугу в каталоге и повторно нажмите «Добавить».",
+        )
+        catalog_table.setFocus()
+        return
+
+    on_book_now()
+
+
 main.btnApply.clicked.connect(on_apply_filter)
 main.btnBookNow.clicked.connect(on_book_now)
+
+if hasattr(main, "btnCancelBooking"):
+    main.btnCancelBooking.clicked.connect(on_cancel_booking)
+
+if hasattr(main, "btnAddBooking"):
+    main.btnAddBooking.clicked.connect(on_add_booking)
 
 if hasattr(main, "leSearch"):
     main.leSearch.returnPressed.connect(on_apply_filter)
