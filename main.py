@@ -1,5 +1,7 @@
 import sys
 import os
+import hashlib
+import hmac
 from decimal import Decimal, InvalidOperation
 
 from PySide6.QtWidgets import (
@@ -11,7 +13,7 @@ from PySide6.QtWidgets import (
     QDialog,
 )
 from PySide6.QtUiTools import QUiLoader
-from PySide6.QtCore import QFile, QDate, QTime, QDateTime, Qt
+from PySide6.QtCore import QFile, QDate, QTime, QDateTime, Qt, QByteArray
 from PySide6.QtSql import QSqlQuery
 
 from db import connect_db
@@ -141,28 +143,59 @@ def execute_action(sql, params=None, context=""):
     return True
 
 
-def find_user(login_text):
+def _hash_password(password):
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def _verify_password(password, stored_hash):
+    if not stored_hash:
+        return False
+    if isinstance(stored_hash, QByteArray):
+        try:
+            stored_hash = bytes(stored_hash).decode("utf-8")
+        except Exception:
+            return False
+    try:
+        digest = _hash_password(password)
+    except Exception:
+        return False
+    return hmac.compare_digest(digest, str(stored_hash))
+
+
+def authenticate_user(login_text, password):
     login_text = (login_text or "").strip()
-    if not login_text:
+    password = (password or "").strip()
+
+    if not login_text or not password:
         return None
 
     sql = (
-        "SELECT u.id, u.full_name, r.code AS role_code, r.name AS role_name "
+        "SELECT u.id, u.full_name, u.phone, u.email, u.password_hash, "
+        "       r.code AS role_code, r.name AS role_name "
         "FROM users u "
         "JOIN roles r ON r.id = u.role_id "
-        "WHERE u.phone = ? OR u.email = ? OR lower(u.full_name) = lower(?) "
+        "WHERE (u.phone = ? OR lower(u.email) = lower(?)) "
         "LIMIT 1"
     )
-    query = execute_select(sql, [login_text, login_text, login_text], "Поиск пользователя")
+
+    params = [login_text, login_text]
+    query = execute_select(sql, params, "Аутентификация пользователя")
     if query is None:
         return None
+
     if query.next():
+        stored_hash = query.value("password_hash")
+        if not _verify_password(password, stored_hash):
+            return None
         return {
             "id": query.value("id"),
             "full_name": query.value("full_name"),
+            "phone": query.value("phone"),
+            "email": query.value("email"),
             "role_code": query.value("role_code"),
             "role_name": query.value("role_name"),
         }
+
     return None
 
 
@@ -329,7 +362,7 @@ def fetch_available_slots(
         "       m.id AS master_id, m.full_name AS master_name, m.specialization AS specialization",
         "FROM masters m",
         "JOIN schedule_slots slots ON slots.master_id = m.id",
-        "LEFT JOIN appointments a ON a.slot_id = slots.id",
+        "LEFT JOIN appointments a ON a.slot_id = slots.id AND a.status IN ('ожидает подтверждения','подтверждена')",
         "WHERE ",
         " AND ".join(conditions),
         "ORDER BY slots.start_ts",
@@ -947,26 +980,29 @@ def on_login():
     global current_user
 
     username = login.leUsername.text().strip()
-    role_text = login.cbRole.currentText()
+    password = login.lePassword.text()
 
     if not username:
         QMessageBox.warning(login, "Ошибка", "Введите логин!")
         return
 
-    user = find_user(username)
+    if not password:
+        QMessageBox.warning(login, "Ошибка", "Введите пароль!")
+        return
+
+    user = authenticate_user(username, password)
     if user is None:
-        QMessageBox.information(
+        QMessageBox.warning(
             login,
-            "Информация",
-            "Пользователь не найден в базе данных. Будут показаны общие данные.",
+            "Ошибка входа",
+            "Неверный логин или пароль. Проверьте данные и попробуйте снова.",
         )
-        resolved_role = role_text
-    else:
-        resolved_role = user.get("role_code") or role_text
+        login.lePassword.clear()
+        return
 
     current_user = user
     login.close()
-    setup_role(resolved_role, user)
+    setup_role(user.get("role_code"), user)
     main.show()
 
 
@@ -977,6 +1013,10 @@ if not connect_db():
 
 login = load_ui("ui/LoginWindow.ui")
 main = load_ui("ui/MainWindow.ui")
+
+if login is not None and hasattr(login, "cbRole"):
+    login.cbRole.setEnabled(False)
+    login.cbRole.setToolTip("Роль определяется автоматически по учётной записи")
 
 login.btnLogin.clicked.connect(on_login)
 def on_cancel_booking():
