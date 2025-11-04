@@ -349,11 +349,11 @@ def load_catalog(update_filters=False):
 
     if price_min is not None:
         conditions.append(f"{effective_price_expr} >= ?")
-        params.append(float(price_min))
+        params.append(str(price_min) if isinstance(price_min, Decimal) else price_min)
 
     if price_max is not None:
         conditions.append(f"{effective_price_expr} <= ?")
-        params.append(float(price_max))
+        params.append(str(price_max) if isinstance(price_max, Decimal) else price_max)
 
     if service_id is not None:
         conditions.append("srv.id = ?")
