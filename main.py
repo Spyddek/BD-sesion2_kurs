@@ -87,8 +87,18 @@ def populate_table(table, headers, rows, row_payloads=None):
 
     for row_idx, row in enumerate(rows):
         for col_idx, cell in enumerate(row):
-            item = QTableWidgetItem(format_cell(cell))
+            text_value = format_cell(cell)
+            item = QTableWidgetItem(text_value)
             item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+
+            if isinstance(cell, (int, float, Decimal)):
+                item.setData(Qt.UserRole, float(cell))
+            else:
+                try:
+                    item.setData(Qt.UserRole, float(text_value))
+                except (ValueError, TypeError):
+                    item.setData(Qt.UserRole, text_value)
+
             table.setItem(row_idx, col_idx, item)
 
         if row_payloads and row_idx < len(row_payloads):
@@ -96,11 +106,12 @@ def populate_table(table, headers, rows, row_payloads=None):
             if payload is not None:
                 item = table.item(row_idx, 0)
                 if item is not None:
-                    item.setData(Qt.UserRole, payload)
+                    item.setData(Qt.UserRole + 1, payload)
 
     header = table.horizontalHeader()
     if header is not None:
         header.setStretchLastSection(True)
+
     table.resizeColumnsToContents()
     table.setSortingEnabled(True)
     table.blockSignals(False)
@@ -767,6 +778,32 @@ def load_salon_services():
             )
     populate_table(table, headers, rows, payloads)
 
+def load_service_popularity_for_salon(salon_id):
+    table = getattr(main, "tblPopularity", None)
+    if table is None:
+        return
+
+    headers = ["Услуга", "Количество посещений"]
+
+    sql = (
+        "SELECT s.name AS service_name, COUNT(a.id) AS visits "
+        "FROM appointments a "
+        "JOIN services s ON s.id = a.service_id "
+        "WHERE a.salon_id = ? "
+        "  AND a.status IN ('подтверждена', 'завершена') "
+        "GROUP BY s.name "
+        "ORDER BY visits DESC, s.name ASC"
+    )
+
+    query = execute_select(sql, [salon_id], "Отчёт: популярность услуг")
+    rows = []
+
+    if query is not None:
+        while query.next():
+            rows.append([query.value("service_name"), query.value("visits")])
+
+    populate_table(table, headers, rows)
+
 
 def load_users():
     table = getattr(main, "tblUsers", None)
@@ -818,13 +855,33 @@ def load_data_for_role(role, user):
     if role == "client":
         load_catalog(update_filters=True)
         load_bookings(user["id"] if user else None)
+
     elif role == "salon":
         load_catalog(update_filters=True)
         load_salon_services()
+
+        salon_id = None
+        if user and user.get("id"):
+            salon_query = execute_select(
+                "SELECT salon_id FROM users WHERE id = ?",
+                [user["id"]],
+                "Определение салона для пользователя"
+            )
+            if salon_query and salon_query.next():
+                salon_id = salon_query.value("salon_id")
+
+        if salon_id:
+            load_service_popularity_for_salon(salon_id)
+        else:
+            salons = fetch_salons()
+            if salons:
+                load_service_popularity_for_salon(salons[0]["id"])
+
     elif role == "admin":
         load_catalog(update_filters=True)
         load_salon_services()
         load_users()
+
     else:
         load_catalog(update_filters=True)
         load_bookings(None)
@@ -1041,31 +1098,83 @@ def on_add_booking():
     if current_user is None or current_role != "client":
         QMessageBox.information(
             main,
-            "Добавление записи",
-            "Добавлять записи может только авторизованный клиент.",
+            "Отзывы",
+            "Отзывы могут оставлять только авторизованные клиенты."
         )
         return
 
-    catalog_tab = getattr(main, "tabCatalog", None)
-    if catalog_tab is not None:
-        main.twMain.setCurrentWidget(catalog_tab)
-
-    catalog_table = getattr(main, "tblCatalog", None)
-    if catalog_table is None or catalog_table.rowCount() == 0:
-        QMessageBox.information(main, "Добавление записи", "Каталог пока пуст, выбирать нечего.")
+    table = getattr(main, "tblBookings", None)
+    if table is None or table.rowCount() == 0:
+        QMessageBox.information(main, "Отзывы", "Нет завершённых записей для отзыва.")
         return
 
-    selection_model = catalog_table.selectionModel()
+    selection_model = table.selectionModel()
     if selection_model is None or not selection_model.hasSelection():
+        QMessageBox.information(main, "Отзывы", "Выберите запись для отзыва.")
+        return
+
+    row = selection_model.selectedRows()[0].row()
+    id_item = table.item(row, 0)
+    status_item = table.item(row, 4)
+    if id_item is None or status_item is None:
+        QMessageBox.warning(main, "Отзывы", "Не удалось определить выбранную запись.")
+        return
+
+    appointment_id = int(id_item.text())
+    status = status_item.text()
+
+    if status.lower() != "завершена":
         QMessageBox.information(
             main,
-            "Добавление записи",
-            "Выберите услугу в каталоге и повторно нажмите «Добавить».",
+            "Отзывы",
+            "Оставлять отзывы можно только после завершённых процедур."
         )
-        catalog_table.setFocus()
         return
 
-    on_book_now()
+    rating, ok_rating = QInputDialog.getInt(
+        main,
+        "Оценка услуги",
+        "Введите оценку от 1 до 5:",
+        5, 1, 5, 1
+    )
+    if not ok_rating:
+        return
+
+    comment, ok_comment = QInputDialog.getMultiLineText(
+        main,
+        "Отзыв",
+        "Напишите ваш отзыв о процедуре:",
+        ""
+    )
+    if not ok_comment:
+        return
+
+    salon_name = table.item(row, 1).text()
+    service_name = table.item(row, 2).text()
+
+    query = execute_select(
+        "SELECT salon_id FROM appointments WHERE id = ?",
+        [appointment_id],
+        "Получение салона для отзыва"
+    )
+    if query is None or not query.next():
+        QMessageBox.warning(main, "Отзывы", "Не удалось найти салон для выбранной записи.")
+        return
+    salon_id = query.value("salon_id")
+
+    if not execute_action(
+        "INSERT INTO reviews (salon_id, client_id, appointment_id, rating, comment) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [salon_id, current_user["id"], appointment_id, rating, comment],
+        "Добавление отзыва"
+    ):
+        return
+
+    QMessageBox.information(
+        main,
+        "Спасибо за отзыв",
+        f"Ваш отзыв о процедуре «{service_name}» в салоне «{salon_name}» успешно добавлен!"
+    )
 
 
 def on_add_service():
