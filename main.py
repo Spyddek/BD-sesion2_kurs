@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QTableWidget,
     QInputDialog,
+    QWidget,
 )
 from PySide6.QtUiTools import QUiLoader
 from PySide6.QtCore import QFile, QDate, QTime, QDateTime, Qt
@@ -33,7 +34,13 @@ ROLE_CONFIGS = {
 
 current_user = None
 current_role = None
-catalog_filter_state = {"city": None, "search": ""}
+catalog_filter_state = {
+    "city": None,
+    "search": "",
+    "price_min": None,
+    "price_max": None,
+    "service_id": None,
+}
 catalog_filters_initialized = False
 
 def load_ui(path):
@@ -80,8 +87,18 @@ def populate_table(table, headers, rows, row_payloads=None):
 
     for row_idx, row in enumerate(rows):
         for col_idx, cell in enumerate(row):
-            item = QTableWidgetItem(format_cell(cell))
+            text_value = format_cell(cell)
+            item = QTableWidgetItem(text_value)
             item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+
+            if isinstance(cell, (int, float, Decimal)):
+                item.setData(Qt.UserRole, float(cell))
+            else:
+                try:
+                    item.setData(Qt.UserRole, float(text_value))
+                except (ValueError, TypeError):
+                    item.setData(Qt.UserRole, text_value)
+
             table.setItem(row_idx, col_idx, item)
 
         if row_payloads and row_idx < len(row_payloads):
@@ -89,11 +106,12 @@ def populate_table(table, headers, rows, row_payloads=None):
             if payload is not None:
                 item = table.item(row_idx, 0)
                 if item is not None:
-                    item.setData(Qt.UserRole, payload)
+                    item.setData(Qt.UserRole + 1, payload)
 
     header = table.horizontalHeader()
     if header is not None:
         header.setStretchLastSection(True)
+
     table.resizeColumnsToContents()
     table.setSortingEnabled(True)
     table.blockSignals(False)
@@ -194,15 +212,107 @@ def populate_city_filter(selected_city=None):
     combo.blockSignals(False)
 
 
+def fetch_catalog_price_values():
+    sql = (
+        "SELECT DISTINCT COALESCE(ss.price, srv.base_price) AS price "
+        "FROM salon_services ss "
+        "JOIN services srv ON srv.id = ss.service_id "
+        "WHERE COALESCE(ss.price, srv.base_price) IS NOT NULL "
+        "ORDER BY price"
+    )
+    query = execute_select(sql, context="Загрузка цен каталога")
+    prices = []
+    seen = set()
+    if query is not None:
+        while query.next():
+            price_value = parse_decimal(query.value("price"), None)
+            if price_value is None or price_value in seen:
+                continue
+            prices.append(price_value)
+            seen.add(price_value)
+    return prices
+
+
+def populate_price_filters(selected_min=None, selected_max=None):
+    combo_min = getattr(main, "cbCPriceMin", None)
+    combo_max = getattr(main, "cbPriceMax", None)
+
+    if combo_min is None and combo_max is None:
+        return
+
+    prices = fetch_catalog_price_values()
+
+    def fill_combo(combo, placeholder, selected_value):
+        if combo is None:
+            return
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(placeholder, None)
+        for price in prices:
+            combo.addItem(format_price(price), price)
+        index = 0
+        if selected_value is not None:
+            found_index = combo.findData(selected_value)
+            if found_index != -1:
+                index = found_index
+        combo.setCurrentIndex(index)
+        combo.blockSignals(False)
+
+    fill_combo(combo_min, "Без минимума", selected_min)
+    fill_combo(combo_max, "Без максимума", selected_max)
+
+
+def populate_service_filter(selected_service_id=None):
+    combo = getattr(main, "cbService", None)
+    if combo is None:
+        return
+
+    sql = (
+        "SELECT DISTINCT srv.id AS service_id, srv.name AS service_name "
+        "FROM services srv "
+        "JOIN salon_services ss ON ss.service_id = srv.id "
+        "ORDER BY srv.name"
+    )
+    query = execute_select(sql, context="Загрузка списка услуг")
+    services = []
+    if query is not None:
+        while query.next():
+            services.append(
+                {
+                    "id": query.value("service_id"),
+                    "name": query.value("service_name"),
+                }
+            )
+
+    combo.blockSignals(True)
+    combo.clear()
+    combo.addItem("Все услуги", None)
+    for service in services:
+        combo.addItem(service["name"], service["id"])
+
+    index = 0
+    if selected_service_id is not None:
+        found_index = combo.findData(selected_service_id)
+        if found_index != -1:
+            index = found_index
+    combo.setCurrentIndex(index)
+    combo.blockSignals(False)
+
+
 def load_catalog(update_filters=False):
     global catalog_filters_initialized
 
     table = getattr(main, "tblCatalog", None)
-    headers = ["Наименование", "Город", "Цена"]
+    headers = ["Услуга", "Салон", "Город", "Цена", "Описание"]
     search_edit = getattr(main, "leSearch", None)
 
     if update_filters or not catalog_filters_initialized:
         populate_city_filter(catalog_filter_state.get("city"))
+        populate_price_filters(
+            catalog_filter_state.get("price_min"),
+            catalog_filter_state.get("price_max"),
+        )
+        populate_service_filter(catalog_filter_state.get("service_id"))
         catalog_filters_initialized = True
 
     if search_edit is not None:
@@ -210,9 +320,10 @@ def load_catalog(update_filters=False):
         if search_edit.text() != current_text:
             search_edit.setText(current_text)
 
+    effective_price_expr = "COALESCE(ss.price, srv.base_price)"
     sql = (
         "SELECT srv.name AS service_name, salons.name AS salon_name, salons.city AS city, "
-        "       COALESCE(ss.price, srv.base_price) AS price, "
+        f"       {effective_price_expr} AS price, srv.description AS description, "
         "       salons.id AS salon_id, srv.id AS service_id "
         "FROM salon_services ss "
         "JOIN salons ON salons.id = ss.salon_id "
@@ -223,6 +334,9 @@ def load_catalog(update_filters=False):
     conditions = []
     selected_city = catalog_filter_state.get("city")
     search_text = (catalog_filter_state.get("search", "") or "").strip()
+    price_min = catalog_filter_state.get("price_min")
+    price_max = catalog_filter_state.get("price_max")
+    service_id = catalog_filter_state.get("service_id")
 
     if selected_city:
         conditions.append("salons.city = ?")
@@ -232,6 +346,18 @@ def load_catalog(update_filters=False):
         like_pattern = f"%{search_text}%"
         conditions.append("(srv.name ILIKE ? OR salons.name ILIKE ?)")
         params.extend([like_pattern, like_pattern])
+
+    if price_min is not None:
+        conditions.append(f"{effective_price_expr} >= ?")
+        params.append(float(price_min))
+
+    if price_max is not None:
+        conditions.append(f"{effective_price_expr} <= ?")
+        params.append(float(price_max))
+
+    if service_id is not None:
+        conditions.append("srv.id = ?")
+        params.append(service_id)
 
     if conditions:
         sql += " WHERE " + " AND ".join(conditions)
@@ -245,8 +371,10 @@ def load_catalog(update_filters=False):
         while query.next():
             rows.append([
                 query.value("service_name"),
+                query.value("salon_name"),
                 query.value("city"),
                 query.value("price"),
+                query.value("description"),
             ])
             payloads.append(
                 {
@@ -254,6 +382,8 @@ def load_catalog(update_filters=False):
                     "service_id": query.value("service_id"),
                     "salon_name": query.value("salon_name"),
                     "service_name": query.value("service_name"),
+                    "price": query.value("price"),
+                    "description": query.value("description"),
                 }
             )
     populate_table(table, headers, rows, payloads)
@@ -444,6 +574,9 @@ def choose_slot_for_booking(slots, salon_name="", service_name=""):
 def read_catalog_filters_from_ui():
     combo = getattr(main, "cbCity", None)
     search_edit = getattr(main, "leSearch", None)
+    price_min_combo = getattr(main, "cbCPriceMin", None)
+    price_max_combo = getattr(main, "cbPriceMax", None)
+    service_combo = getattr(main, "cbService", None)
 
     city_value = None
     if combo is not None and combo.count() > 0:
@@ -455,13 +588,51 @@ def read_catalog_filters_from_ui():
     if search_edit is not None:
         search_text = search_edit.text().strip()
 
-    return city_value, search_text
+    price_min = None
+    if price_min_combo is not None and price_min_combo.count() > 0:
+        data = price_min_combo.currentData()
+        if data is not None:
+            price_min = data
+
+    price_max = None
+    if price_max_combo is not None and price_max_combo.count() > 0:
+        data = price_max_combo.currentData()
+        if data is not None:
+            price_max = data
+
+    service_id = None
+    if service_combo is not None and service_combo.count() > 0:
+        data = service_combo.currentData()
+        if data is not None:
+            service_id = data
+
+    return {
+        "city": city_value,
+        "search": search_text,
+        "price_min": price_min,
+        "price_max": price_max,
+        "service_id": service_id,
+    }
 
 
 def on_apply_filter():
-    city_value, search_text = read_catalog_filters_from_ui()
-    catalog_filter_state["city"] = city_value
-    catalog_filter_state["search"] = search_text
+    filters = read_catalog_filters_from_ui()
+
+    price_min = filters.get("price_min")
+    price_max = filters.get("price_max")
+    if price_min is not None and price_max is not None and price_min > price_max:
+        QMessageBox.warning(
+            main,
+            "Некорректный диапазон",
+            "Минимальная цена не может быть больше максимальной.",
+        )
+        populate_price_filters(
+            catalog_filter_state.get("price_min"),
+            catalog_filter_state.get("price_max"),
+        )
+        return
+
+    catalog_filter_state.update(filters)
 
     load_catalog()
 
@@ -607,6 +778,32 @@ def load_salon_services():
             )
     populate_table(table, headers, rows, payloads)
 
+def load_service_popularity_for_salon(salon_id):
+    table = getattr(main, "tblPopularity", None)
+    if table is None:
+        return
+
+    headers = ["Услуга", "Количество посещений"]
+
+    sql = (
+        "SELECT s.name AS service_name, COUNT(a.id) AS visits "
+        "FROM appointments a "
+        "JOIN services s ON s.id = a.service_id "
+        "WHERE a.salon_id = ? "
+        "  AND a.status IN ('подтверждена', 'завершена') "
+        "GROUP BY s.name "
+        "ORDER BY visits DESC, s.name ASC"
+    )
+
+    query = execute_select(sql, [salon_id], "Отчёт: популярность услуг")
+    rows = []
+
+    if query is not None:
+        while query.next():
+            rows.append([query.value("service_name"), query.value("visits")])
+
+    populate_table(table, headers, rows)
+
 
 def load_users():
     table = getattr(main, "tblUsers", None)
@@ -658,13 +855,33 @@ def load_data_for_role(role, user):
     if role == "client":
         load_catalog(update_filters=True)
         load_bookings(user["id"] if user else None)
+
     elif role == "salon":
         load_catalog(update_filters=True)
         load_salon_services()
+
+        salon_id = None
+        if user and user.get("id"):
+            salon_query = execute_select(
+                "SELECT salon_id FROM users WHERE id = ?",
+                [user["id"]],
+                "Определение салона для пользователя"
+            )
+            if salon_query and salon_query.next():
+                salon_id = salon_query.value("salon_id")
+
+        if salon_id:
+            load_service_popularity_for_salon(salon_id)
+        else:
+            salons = fetch_salons()
+            if salons:
+                load_service_popularity_for_salon(salons[0]["id"])
+
     elif role == "admin":
         load_catalog(update_filters=True)
         load_salon_services()
         load_users()
+
     else:
         load_catalog(update_filters=True)
         load_bookings(None)
@@ -703,6 +920,9 @@ def setup_role(role, user=None):
     catalog_filters_initialized = False
     catalog_filter_state["city"] = None
     catalog_filter_state["search"] = ""
+    catalog_filter_state["price_min"] = None
+    catalog_filter_state["price_max"] = None
+    catalog_filter_state["service_id"] = None
 
     tabs = {
         "catalog": getattr(main, "tabCatalog", None),
@@ -878,31 +1098,83 @@ def on_add_booking():
     if current_user is None or current_role != "client":
         QMessageBox.information(
             main,
-            "Добавление записи",
-            "Добавлять записи может только авторизованный клиент.",
+            "Отзывы",
+            "Отзывы могут оставлять только авторизованные клиенты."
         )
         return
 
-    catalog_tab = getattr(main, "tabCatalog", None)
-    if catalog_tab is not None:
-        main.twMain.setCurrentWidget(catalog_tab)
-
-    catalog_table = getattr(main, "tblCatalog", None)
-    if catalog_table is None or catalog_table.rowCount() == 0:
-        QMessageBox.information(main, "Добавление записи", "Каталог пока пуст, выбирать нечего.")
+    table = getattr(main, "tblBookings", None)
+    if table is None or table.rowCount() == 0:
+        QMessageBox.information(main, "Отзывы", "Нет завершённых записей для отзыва.")
         return
 
-    selection_model = catalog_table.selectionModel()
+    selection_model = table.selectionModel()
     if selection_model is None or not selection_model.hasSelection():
+        QMessageBox.information(main, "Отзывы", "Выберите запись для отзыва.")
+        return
+
+    row = selection_model.selectedRows()[0].row()
+    id_item = table.item(row, 0)
+    status_item = table.item(row, 4)
+    if id_item is None or status_item is None:
+        QMessageBox.warning(main, "Отзывы", "Не удалось определить выбранную запись.")
+        return
+
+    appointment_id = int(id_item.text())
+    status = status_item.text()
+
+    if status.lower() != "завершена":
         QMessageBox.information(
             main,
-            "Добавление записи",
-            "Выберите услугу в каталоге и повторно нажмите «Добавить».",
+            "Отзывы",
+            "Оставлять отзывы можно только после завершённых процедур."
         )
-        catalog_table.setFocus()
         return
 
-    on_book_now()
+    rating, ok_rating = QInputDialog.getInt(
+        main,
+        "Оценка услуги",
+        "Введите оценку от 1 до 5:",
+        5, 1, 5, 1
+    )
+    if not ok_rating:
+        return
+
+    comment, ok_comment = QInputDialog.getMultiLineText(
+        main,
+        "Отзыв",
+        "Напишите ваш отзыв о процедуре:",
+        ""
+    )
+    if not ok_comment:
+        return
+
+    salon_name = table.item(row, 1).text()
+    service_name = table.item(row, 2).text()
+
+    query = execute_select(
+        "SELECT salon_id FROM appointments WHERE id = ?",
+        [appointment_id],
+        "Получение салона для отзыва"
+    )
+    if query is None or not query.next():
+        QMessageBox.warning(main, "Отзывы", "Не удалось найти салон для выбранной записи.")
+        return
+    salon_id = query.value("salon_id")
+
+    if not execute_action(
+        "INSERT INTO reviews (salon_id, client_id, appointment_id, rating, comment) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [salon_id, current_user["id"], appointment_id, rating, comment],
+        "Добавление отзыва"
+    ):
+        return
+
+    QMessageBox.information(
+        main,
+        "Спасибо за отзыв",
+        f"Ваш отзыв о процедуре «{service_name}» в салоне «{salon_name}» успешно добавлен!"
+    )
 
 
 def on_add_service():
@@ -1147,35 +1419,44 @@ def on_approve_review():
     )
 
 
-main.btnApply.clicked.connect(on_apply_filter)
-main.btnBookNow.clicked.connect(on_book_now)
+def resolve_widget(parent, object_name):
+    widget = getattr(parent, object_name, None)
+    if widget is None and isinstance(parent, QWidget):
+        widget = parent.findChild(QWidget, object_name)
+    return widget
 
-if hasattr(main, "btnCancelBooking"):
-    main.btnCancelBooking.clicked.connect(on_cancel_booking)
 
-if hasattr(main, "btnAddBooking"):
-    main.btnAddBooking.clicked.connect(on_add_booking)
+def connect_widget_signal(parent, object_name, signal_name, slot):
+    widget = resolve_widget(parent, object_name)
+    if widget is None:
+        return False
 
-if hasattr(main, "btnAddService"):
-    main.btnAddService.clicked.connect(on_add_service)
+    signal = getattr(widget, signal_name, None)
+    if signal is None:
+        return False
 
-if hasattr(main, "btnDeleteService"):
-    main.btnDeleteService.clicked.connect(on_delete_service)
+    connector = getattr(signal, "connect", None)
+    if not callable(connector):
+        return False
 
-if hasattr(main, "btnSaveService"):
-    main.btnSaveService.clicked.connect(on_save_service)
+    connector(slot)
+    return True
 
-if hasattr(main, "btnDeleteUser"):
-    main.btnDeleteUser.clicked.connect(on_delete_user)
 
-if hasattr(main, "btnApproveReview"):
-    main.btnApproveReview.clicked.connect(on_approve_review)
-
-if hasattr(main, "leSearch"):
-    main.leSearch.returnPressed.connect(on_apply_filter)
-
-if hasattr(main, "cbCity"):
-    main.cbCity.currentIndexChanged.connect(lambda *_: on_apply_filter())
+connect_widget_signal(main, "btnApply", "clicked", on_apply_filter)
+connect_widget_signal(main, "btnBookNow", "clicked", on_book_now)
+connect_widget_signal(main, "btnCancelBooking", "clicked", on_cancel_booking)
+connect_widget_signal(main, "btnAddBooking", "clicked", on_add_booking)
+connect_widget_signal(main, "btnAddService", "clicked", on_add_service)
+connect_widget_signal(main, "btnDeleteService", "clicked", on_delete_service)
+connect_widget_signal(main, "btnSaveService", "clicked", on_save_service)
+connect_widget_signal(main, "btnDeleteUser", "clicked", on_delete_user)
+connect_widget_signal(main, "btnApproveReview", "clicked", on_approve_review)
+connect_widget_signal(main, "leSearch", "returnPressed", on_apply_filter)
+connect_widget_signal(main, "cbCity", "currentIndexChanged", lambda *_: on_apply_filter())
+connect_widget_signal(main, "cbCPriceMin", "currentIndexChanged", lambda *_: on_apply_filter())
+connect_widget_signal(main, "cbPriceMax", "currentIndexChanged", lambda *_: on_apply_filter())
+connect_widget_signal(main, "cbService", "currentIndexChanged", lambda *_: on_apply_filter())
 
 configure_role_controls(None)
 
