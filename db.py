@@ -31,7 +31,7 @@ def connect_db():
             "Переменная SMARTSPA_DB_PASSWORD не установлена."
             " Подключение может завершиться неудачей.",
         )
-        password = ""
+        password = "23565471"
     db.setPassword(password)
 
     db_port = _read_port(os.getenv("SMARTSPA_DB_PORT", "5432"))
