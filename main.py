@@ -1147,7 +1147,9 @@ def on_approve_review():
     )
 
 
-main.btnApply.clicked.connect(on_apply_filter)
+if hasattr(main, "btnApply"):
+    main.btnApply.clicked.connect(on_apply_filter)
+
 main.btnBookNow.clicked.connect(on_book_now)
 
 if hasattr(main, "btnCancelBooking"):
