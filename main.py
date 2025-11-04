@@ -1,6 +1,6 @@
 import sys
 import os
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -122,6 +122,22 @@ def execute_select(sql, params=None, context=""):
             show_db_error(query, context)
             return None
     return query
+
+
+def execute_action(sql, params=None, context=""):
+    query = QSqlQuery()
+    if params:
+        query.prepare(sql)
+        for value in params:
+            query.addBindValue(value)
+        if not query.exec():
+            show_db_error(query, context)
+            return False
+    else:
+        if not query.exec(sql):
+            show_db_error(query, context)
+            return False
+    return True
 
 
 def find_user(login_text):
@@ -307,6 +323,73 @@ def fetch_available_slots(salon_id, limit=20):
     return slots
 
 
+def fetch_salons():
+    sql = "SELECT id, name, city FROM salons ORDER BY name"
+    query = execute_select(sql, context="Загрузка списка салонов")
+    salons = []
+    if query is not None:
+        while query.next():
+            salons.append(
+                {
+                    "id": query.value("id"),
+                    "name": query.value("name"),
+                    "city": query.value("city"),
+                }
+            )
+    return salons
+
+
+def fetch_available_services_for_salon(salon_id):
+    if salon_id is None:
+        return []
+
+    sql = (
+        "SELECT s.id AS service_id, s.name AS service_name, s.duration_min, s.base_price "
+        "FROM services s "
+        "WHERE NOT EXISTS ("
+        "    SELECT 1 FROM salon_services ss "
+        "    WHERE ss.salon_id = ? AND ss.service_id = s.id"
+        ") "
+        "ORDER BY s.name"
+    )
+    query = execute_select(sql, [salon_id], "Доступные услуги для салона")
+    services = []
+    if query is not None:
+        while query.next():
+            services.append(
+                {
+                    "id": query.value("service_id"),
+                    "name": query.value("service_name"),
+                    "duration_min": query.value("duration_min"),
+                    "base_price": query.value("base_price"),
+                }
+            )
+    return services
+
+
+def format_price(value):
+    text = format_cell(value)
+    if not text:
+        text = "0.00"
+    if "₽" not in text:
+        text += " ₽"
+    return text
+
+
+def parse_decimal(value, fallback=Decimal("0")):
+    if isinstance(value, (Decimal, float, int)):
+        return Decimal(str(value))
+
+    text = (value or "").strip()
+    text = text.replace("₽", "").replace(" ", "").replace(",", ".")
+    if not text:
+        return fallback
+    try:
+        return Decimal(text)
+    except (InvalidOperation, ValueError):
+        return fallback
+
+
 def choose_slot_for_booking(slots, salon_name="", service_name=""):
     if not slots:
         return None
@@ -488,7 +571,8 @@ def load_salon_services():
     headers = ["Салон", "Услуга", "Длительность (мин)", "Цена"]
 
     sql = (
-        "SELECT salons.name AS salon_name, srv.name AS service_name, "
+        "SELECT salons.id AS salon_id, salons.name AS salon_name, salons.city AS city, "
+        "       srv.id AS service_id, srv.name AS service_name, "
         "       srv.duration_min AS duration_min, COALESCE(ss.price, srv.base_price) AS price "
         "FROM salon_services ss "
         "JOIN salons ON salons.id = ss.salon_id "
@@ -497,15 +581,31 @@ def load_salon_services():
     )
     query = execute_select(sql, context="Загрузка услуг салона")
     rows = []
+    payloads = []
     if query is not None:
         while query.next():
+            salon_name = query.value("salon_name")
+            city = query.value("city")
+            display_name = salon_name
+            if city and city not in (salon_name or ""):
+                display_name = f"{salon_name} ({city})"
             rows.append([
-                query.value("salon_name"),
+                display_name,
                 query.value("service_name"),
                 query.value("duration_min"),
                 query.value("price"),
             ])
-    populate_table(table, headers, rows)
+            payloads.append(
+                {
+                    "salon_id": query.value("salon_id"),
+                    "service_id": query.value("service_id"),
+                    "salon_name": salon_name,
+                    "city": city,
+                    "service_name": query.value("service_name"),
+                    "price": query.value("price"),
+                }
+            )
+    populate_table(table, headers, rows, payloads)
 
 
 def load_users():
@@ -532,6 +632,28 @@ def load_users():
     populate_table(table, headers, rows)
 
 
+def get_selected_row_payload(table):
+    if table is None or table.rowCount() == 0:
+        return None
+
+    selection_model = table.selectionModel()
+    if selection_model is None or not selection_model.hasSelection():
+        return None
+
+    selected_rows = selection_model.selectedRows()
+    if not selected_rows:
+        return None
+
+    row = selected_rows[0].row()
+    item = table.item(row, 0)
+    if item is None:
+        return None
+    payload = item.data(Qt.UserRole)
+    if payload is None:
+        return None
+    return row, payload
+
+
 def load_data_for_role(role, user):
     if role == "client":
         load_catalog(update_filters=True)
@@ -546,6 +668,33 @@ def load_data_for_role(role, user):
     else:
         load_catalog(update_filters=True)
         load_bookings(None)
+
+
+def configure_role_controls(role):
+    role = role or ""
+
+    client_only = role == "client"
+    manage_services = role in {"salon", "admin"}
+    is_admin = role == "admin"
+
+    if hasattr(main, "btnBookNow"):
+        main.btnBookNow.setEnabled(client_only)
+    if hasattr(main, "btnAddBooking"):
+        main.btnAddBooking.setEnabled(client_only)
+    if hasattr(main, "btnCancelBooking"):
+        main.btnCancelBooking.setEnabled(client_only)
+
+    if hasattr(main, "btnAddService"):
+        main.btnAddService.setEnabled(manage_services)
+    if hasattr(main, "btnDeleteService"):
+        main.btnDeleteService.setEnabled(manage_services)
+    if hasattr(main, "btnSaveService"):
+        main.btnSaveService.setEnabled(manage_services)
+
+    if hasattr(main, "btnDeleteUser"):
+        main.btnDeleteUser.setEnabled(is_admin)
+    if hasattr(main, "btnApproveReview"):
+        main.btnApproveReview.setEnabled(False)
 
 
 def setup_role(role, user=None):
@@ -601,6 +750,7 @@ def setup_role(role, user=None):
         show_tabs(available_tabs, title)
 
     current_role = canonical_role
+    configure_role_controls(canonical_role)
     load_data_for_role(canonical_role, user)
 
 
@@ -755,6 +905,248 @@ def on_add_booking():
     on_book_now()
 
 
+def on_add_service():
+    salons = fetch_salons()
+    if not salons:
+        QMessageBox.information(main, "Добавление услуги", "В базе пока нет салонов.")
+        return
+
+    salon = salons[0]
+    if len(salons) > 1:
+        options = [
+            f"{item['name']} ({item['city']})" if item.get("city") else item["name"]
+            for item in salons
+        ]
+        selection, accepted = QInputDialog.getItem(
+            main,
+            "Выбор салона",
+            "Выберите салон, куда добавить услугу:",
+            options,
+            0,
+            False,
+        )
+        if not accepted:
+            return
+        try:
+            salon = salons[options.index(selection)]
+        except ValueError:
+            return
+
+    available = fetch_available_services_for_salon(salon.get("id"))
+    if not available:
+        QMessageBox.information(
+            main,
+            "Добавление услуги",
+            "Для выбранного салона уже подключены все услуги или база услуг пуста.",
+        )
+        return
+
+    service_options = []
+    for service in available:
+        details = [service.get("name") or "Услуга"]
+        duration = service.get("duration_min")
+        if duration:
+            details.append(f"{duration} мин")
+        base_price = service.get("base_price")
+        if base_price is not None:
+            details.append(format_price(base_price))
+        service_options.append(" — ".join(details))
+
+    selection, accepted = QInputDialog.getItem(
+        main,
+        "Выбор услуги",
+        "Выберите услугу, которую нужно добавить:",
+        service_options,
+        0,
+        False,
+    )
+    if not accepted:
+        return
+
+    try:
+        service = available[service_options.index(selection)]
+    except ValueError:
+        return
+
+    base_price = parse_decimal(service.get("base_price"), Decimal("0"))
+    price_value, ok = QInputDialog.getDouble(
+        main,
+        "Цена услуги",
+        f"Укажите стоимость для «{service.get('name')}»:",
+        float(base_price),
+        0.0,
+        1_000_000.0,
+        2,
+    )
+    if not ok:
+        return
+
+    if not execute_action(
+        "INSERT INTO salon_services (salon_id, service_id, price) VALUES (?, ?, ?)",
+        [salon.get("id"), service.get("id"), round(price_value, 2)],
+        "Добавление услуги в салон",
+    ):
+        return
+
+    load_salon_services()
+    load_catalog()
+
+    QMessageBox.information(
+        main,
+        "Услуга добавлена",
+        f"Услуга «{service.get('name')}» добавлена в салон «{salon.get('name')}».",
+    )
+
+
+def on_delete_service():
+    table = getattr(main, "tblServices", None)
+    selection = get_selected_row_payload(table)
+    if not selection:
+        QMessageBox.information(
+            main,
+            "Удаление услуги",
+            "Выберите услугу из списка, которую нужно удалить.",
+        )
+        return
+
+    _, payload = selection
+    confirm = QMessageBox.question(
+        main,
+        "Удаление услуги",
+        (
+            f"Удалить услугу «{payload.get('service_name')}» из салона «{payload.get('salon_name')}»?\n"
+            "Записи клиентов, связанные с этой услугой, могут стать недоступны."
+        ),
+        QMessageBox.Yes | QMessageBox.No,
+        QMessageBox.No,
+    )
+    if confirm != QMessageBox.Yes:
+        return
+
+    if not execute_action(
+        "DELETE FROM salon_services WHERE salon_id = ? AND service_id = ?",
+        [payload.get("salon_id"), payload.get("service_id")],
+        "Удаление услуги салона",
+    ):
+        return
+
+    load_salon_services()
+    load_catalog()
+
+    QMessageBox.information(main, "Услуга удалена", "Услуга успешно удалена из салона.")
+
+
+def on_save_service():
+    table = getattr(main, "tblServices", None)
+    selection = get_selected_row_payload(table)
+    if not selection:
+        QMessageBox.information(
+            main,
+            "Изменение цены",
+            "Выберите услугу, для которой нужно изменить стоимость.",
+        )
+        return
+
+    row, payload = selection
+    price_item = table.item(row, 3) if table else None
+    current_price = parse_decimal(payload.get("price"), Decimal("0"))
+    if price_item is not None:
+        current_price = parse_decimal(price_item.text(), current_price)
+
+    new_price, ok = QInputDialog.getDouble(
+        main,
+        "Изменение цены",
+        (
+            f"Укажите новую цену для «{payload.get('service_name')}»\n"
+            f"в салоне «{payload.get('salon_name')}»."
+        ),
+        float(current_price),
+        0.0,
+        1_000_000.0,
+        2,
+    )
+    if not ok:
+        return
+
+    if not execute_action(
+        "UPDATE salon_services SET price = ? WHERE salon_id = ? AND service_id = ?",
+        [round(new_price, 2), payload.get("salon_id"), payload.get("service_id")],
+        "Обновление цены услуги",
+    ):
+        return
+
+    load_salon_services()
+    load_catalog()
+
+    QMessageBox.information(main, "Цена обновлена", "Стоимость услуги успешно изменена.")
+
+
+def on_delete_user():
+    table = getattr(main, "tblUsers", None)
+    if table is None or table.rowCount() == 0:
+        QMessageBox.information(main, "Удаление пользователя", "Список пользователей пуст.")
+        return
+
+    selection_model = table.selectionModel()
+    if selection_model is None or not selection_model.hasSelection():
+        QMessageBox.information(
+            main,
+            "Удаление пользователя",
+            "Выберите пользователя из таблицы, чтобы удалить его.",
+        )
+        return
+
+    row = selection_model.selectedRows()[0].row()
+    id_item = table.item(row, 0)
+    name_item = table.item(row, 1)
+    if id_item is None:
+        QMessageBox.warning(main, "Удаление пользователя", "Не удалось определить пользователя.")
+        return
+
+    try:
+        user_id = int(id_item.text())
+    except (TypeError, ValueError):
+        QMessageBox.warning(main, "Удаление пользователя", "Некорректный идентификатор пользователя.")
+        return
+
+    if current_user and current_user.get("id") == user_id:
+        QMessageBox.warning(
+            main,
+            "Удаление пользователя",
+            "Нельзя удалить себя из системы во время активной сессии.",
+        )
+        return
+
+    user_name = name_item.text() if name_item else "пользователь"
+    confirm = QMessageBox.question(
+        main,
+        "Удаление пользователя",
+        f"Удалить {user_name}?",
+        QMessageBox.Yes | QMessageBox.No,
+        QMessageBox.No,
+    )
+    if confirm != QMessageBox.Yes:
+        return
+
+    if not execute_action(
+        "DELETE FROM users WHERE id = ?",
+        [user_id],
+        "Удаление пользователя",
+    ):
+        return
+
+    load_users()
+    QMessageBox.information(main, "Пользователь удалён", "Пользователь успешно удалён.")
+
+
+def on_approve_review():
+    QMessageBox.information(
+        main,
+        "Отзывы",
+        "Функция модерации отзывов пока недоступна в клиентском приложении.",
+    )
+
+
 main.btnApply.clicked.connect(on_apply_filter)
 main.btnBookNow.clicked.connect(on_book_now)
 
@@ -764,11 +1156,28 @@ if hasattr(main, "btnCancelBooking"):
 if hasattr(main, "btnAddBooking"):
     main.btnAddBooking.clicked.connect(on_add_booking)
 
+if hasattr(main, "btnAddService"):
+    main.btnAddService.clicked.connect(on_add_service)
+
+if hasattr(main, "btnDeleteService"):
+    main.btnDeleteService.clicked.connect(on_delete_service)
+
+if hasattr(main, "btnSaveService"):
+    main.btnSaveService.clicked.connect(on_save_service)
+
+if hasattr(main, "btnDeleteUser"):
+    main.btnDeleteUser.clicked.connect(on_delete_user)
+
+if hasattr(main, "btnApproveReview"):
+    main.btnApproveReview.clicked.connect(on_approve_review)
+
 if hasattr(main, "leSearch"):
     main.leSearch.returnPressed.connect(on_apply_filter)
 
 if hasattr(main, "cbCity"):
     main.cbCity.currentIndexChanged.connect(lambda *_: on_apply_filter())
+
+configure_role_controls(None)
 
 login.show()
 sys.exit(app.exec())
