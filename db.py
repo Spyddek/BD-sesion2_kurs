@@ -13,6 +13,15 @@ def connect_db():
         QMessageBox.critical(None, "Ошибка БД", db.lastError().text())
         return False
 
-    query = QSqlQuery("SET search_path TO smart_spa, public;")
-    query.exec()
+    query = QSqlQuery()
+    if not query.exec("SET search_path TO smart_spa, public;"):
+        QMessageBox.warning(None, "Предупреждение БД", query.lastError().text())
+
+    suppress_notice_query = QSqlQuery()
+    if not suppress_notice_query.exec("SET client_min_messages TO warning;"):
+        QMessageBox.warning(
+            None,
+            "Предупреждение БД",
+            suppress_notice_query.lastError().text(),
+        )
     return True
