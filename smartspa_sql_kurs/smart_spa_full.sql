@@ -174,8 +174,10 @@ INSERT INTO roles(code, name) VALUES
   ('admin','Администратор')
 ON CONFLICT DO NOTHING;
 
+-- Пароль по умолчанию: password123 (SHA-256)
 INSERT INTO users(full_name, phone, email, password_hash, role_id)
-VALUES ('Иван Петров', '+79990000001', 'ivan@example.com', 'hash',
+VALUES ('Иван Петров', '+79990000001', 'ivan@example.com',
+        'ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f',
         (SELECT id FROM roles WHERE code='client'))
 ON CONFLICT DO NOTHING;
 

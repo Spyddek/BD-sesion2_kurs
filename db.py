@@ -1,16 +1,35 @@
+import os
+
 from PySide6.QtSql import QSqlDatabase, QSqlQuery
 from PySide6.QtWidgets import QMessageBox
 
 def connect_db():
     db = QSqlDatabase.addDatabase("QPSQL")
-    db.setHostName("localhost")
-    db.setDatabaseName("smart_spa")
-    db.setUserName("postgres")
-    db.setPassword("23565471")
-    db.setPort(5432)
+    db.setHostName(os.environ.get("SMARTSPA_DB_HOST", "localhost"))
+    db.setDatabaseName(os.environ.get("SMARTSPA_DB_NAME", "smart_spa"))
+
+    username = os.environ.get("SMARTSPA_DB_USER")
+    password = os.environ.get("SMARTSPA_DB_PASSWORD")
+    if username:
+        db.setUserName(username)
+    if password:
+        db.setPassword(password)
+
+    port = os.environ.get("SMARTSPA_DB_PORT")
+    try:
+        db.setPort(int(port) if port else 5432)
+    except (TypeError, ValueError):
+        db.setPort(5432)
 
     if not db.open():
-        QMessageBox.critical(None, "Ошибка БД", db.lastError().text())
+        error = db.lastError().text()
+        if not username:
+            error = (
+                "Не задан пользователь базы данных. "
+                "Укажите переменную окружения SMARTSPA_DB_USER.\n"
+                f"{error}"
+            )
+        QMessageBox.critical(None, "Ошибка БД", error)
         return False
 
     query = QSqlQuery()
