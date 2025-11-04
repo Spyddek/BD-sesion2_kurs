@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QTableWidget,
     QInputDialog,
+    QWidget,
 )
 from PySide6.QtUiTools import QUiLoader
 from PySide6.QtCore import QFile, QDate, QTime, QDateTime, Qt
@@ -1309,45 +1310,44 @@ def on_approve_review():
     )
 
 
-if hasattr(main, "btnApply"):
-    main.btnApply.clicked.connect(on_apply_filter)
-main.btnBookNow.clicked.connect(on_book_now)
+def resolve_widget(parent, object_name):
+    widget = getattr(parent, object_name, None)
+    if widget is None and isinstance(parent, QWidget):
+        widget = parent.findChild(QWidget, object_name)
+    return widget
 
-if hasattr(main, "btnCancelBooking"):
-    main.btnCancelBooking.clicked.connect(on_cancel_booking)
 
-if hasattr(main, "btnAddBooking"):
-    main.btnAddBooking.clicked.connect(on_add_booking)
+def connect_widget_signal(parent, object_name, signal_name, slot):
+    widget = resolve_widget(parent, object_name)
+    if widget is None:
+        return False
 
-if hasattr(main, "btnAddService"):
-    main.btnAddService.clicked.connect(on_add_service)
+    signal = getattr(widget, signal_name, None)
+    if signal is None:
+        return False
 
-if hasattr(main, "btnDeleteService"):
-    main.btnDeleteService.clicked.connect(on_delete_service)
+    connector = getattr(signal, "connect", None)
+    if not callable(connector):
+        return False
 
-if hasattr(main, "btnSaveService"):
-    main.btnSaveService.clicked.connect(on_save_service)
+    connector(slot)
+    return True
 
-if hasattr(main, "btnDeleteUser"):
-    main.btnDeleteUser.clicked.connect(on_delete_user)
 
-if hasattr(main, "btnApproveReview"):
-    main.btnApproveReview.clicked.connect(on_approve_review)
-
-if hasattr(main, "leSearch"):
-    main.leSearch.returnPressed.connect(on_apply_filter)
-
-if hasattr(main, "cbCity"):
-    main.cbCity.currentIndexChanged.connect(lambda *_: on_apply_filter())
-
-if hasattr(main, "cbCPriceMin"):
-    main.cbCPriceMin.currentIndexChanged.connect(lambda *_: on_apply_filter())
-
-if hasattr(main, "cbPriceMax"):
-    main.cbPriceMax.currentIndexChanged.connect(lambda *_: on_apply_filter())
-
-if hasattr(main, "cbService"):
-    main.cbService.currentIndexChanged.connect(lambda *_: on_apply_filter())
+connect_widget_signal(main, "btnApply", "clicked", on_apply_filter)
+connect_widget_signal(main, "btnBookNow", "clicked", on_book_now)
+connect_widget_signal(main, "btnCancelBooking", "clicked", on_cancel_booking)
+connect_widget_signal(main, "btnAddBooking", "clicked", on_add_booking)
+connect_widget_signal(main, "btnAddService", "clicked", on_add_service)
+connect_widget_signal(main, "btnDeleteService", "clicked", on_delete_service)
+connect_widget_signal(main, "btnSaveService", "clicked", on_save_service)
+connect_widget_signal(main, "btnDeleteUser", "clicked", on_delete_user)
+connect_widget_signal(main, "btnApproveReview", "clicked", on_approve_review)
+connect_widget_signal(main, "leSearch", "returnPressed", on_apply_filter)
+connect_widget_signal(main, "cbCity", "currentIndexChanged", lambda *_: on_apply_filter())
+connect_widget_signal(main, "cbCPriceMin", "currentIndexChanged", lambda *_: on_apply_filter())
+connect_widget_signal(main, "cbPriceMax", "currentIndexChanged", lambda *_: on_apply_filter())
+connect_widget_signal(main, "cbService", "currentIndexChanged", lambda *_: on_apply_filter())
 
 configure_role_controls(None)
 
