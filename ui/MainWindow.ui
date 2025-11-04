@@ -29,7 +29,7 @@
     <attribute name="title">
      <string>Каталог</string>
     </attribute>
-    <widget class="QWidget" name="">
+    <widget class="QWidget" name="layoutWidget">
      <property name="geometry">
       <rect>
        <x>9</x>
@@ -258,7 +258,7 @@
           </font>
          </property>
          <property name="text">
-          <string>Сохранить</string>
+          <string>Изменить стоимость</string>
          </property>
         </widget>
        </item>

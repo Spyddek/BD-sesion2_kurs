@@ -6,7 +6,7 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>640</width>
+    <width>730</width>
     <height>480</height>
    </rect>
   </property>
@@ -55,11 +55,11 @@
      </item>
      <item>
       <widget class="QDateEdit" name="deStartDate">
-       <property name="calendarPopup">
-        <bool>true</bool>
-       </property>
        <property name="displayFormat">
         <string>dd.MM.yyyy</string>
+       </property>
+       <property name="calendarPopup">
+        <bool>true</bool>
        </property>
       </widget>
      </item>
@@ -72,11 +72,11 @@
      </item>
      <item>
       <widget class="QDateEdit" name="deEndDate">
-       <property name="calendarPopup">
-        <bool>true</bool>
-       </property>
        <property name="displayFormat">
         <string>dd.MM.yyyy</string>
+       </property>
+       <property name="calendarPopup">
+        <bool>true</bool>
        </property>
       </widget>
      </item>
