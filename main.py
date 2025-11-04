@@ -1446,6 +1446,16 @@ def connect_widget_signal(parent, object_name, signal_name, slot):
     if not callable(connector):
         return False
 
+    disconnect = getattr(signal, "disconnect", None)
+    if callable(disconnect):
+        try:
+            disconnect(slot)
+        except TypeError:
+            try:
+                disconnect()
+            except TypeError:
+                pass
+
     connector(slot)
     return True
 
