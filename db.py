@@ -1,13 +1,41 @@
+import os
+
 from PySide6.QtSql import QSqlDatabase, QSqlQuery
 from PySide6.QtWidgets import QMessageBox
 
+
+def _read_port(value: str, default: int = 5432) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        QMessageBox.warning(
+            None,
+            "Настройки БД",
+            "Некорректное значение порта в переменной SMARTSPA_DB_PORT."
+            f" Используется значение по умолчанию {default}.",
+        )
+        return default
+
+
 def connect_db():
     db = QSqlDatabase.addDatabase("QPSQL")
-    db.setHostName("localhost")
-    db.setDatabaseName("smart_spa")
-    db.setUserName("postgres")
-    db.setPassword("23565471")
-    db.setPort(5432)
+    db.setHostName(os.getenv("SMARTSPA_DB_HOST", "localhost"))
+    db.setDatabaseName(os.getenv("SMARTSPA_DB_NAME", "smart_spa"))
+    db.setUserName(os.getenv("SMARTSPA_DB_USER", "postgres"))
+
+    password = os.getenv("SMARTSPA_DB_PASSWORD")
+    if password is None:
+        QMessageBox.warning(
+            None,
+            "Настройки БД",
+            "Переменная SMARTSPA_DB_PASSWORD не установлена."
+            " Подключение может завершиться неудачей.",
+        )
+        password = ""
+    db.setPassword(password)
+
+    db_port = _read_port(os.getenv("SMARTSPA_DB_PORT", "5432"))
+    db.setPort(db_port)
 
     if not db.open():
         QMessageBox.critical(None, "Ошибка БД", db.lastError().text())
