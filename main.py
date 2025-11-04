@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QTableWidget,
     QInputDialog,
+    QDialog,
 )
 from PySide6.QtUiTools import QUiLoader
 from PySide6.QtCore import QFile, QDate, QTime, QDateTime, Qt
@@ -291,22 +292,52 @@ def load_bookings(user_id):
     populate_table(table, headers, rows)
 
 
-def fetch_available_slots(salon_id, limit=20):
+def fetch_available_slots(
+    salon_id,
+    limit=20,
+    master_id=None,
+    start_dt=None,
+    end_dt=None,
+):
     if salon_id is None:
         return []
 
-    sql = (
-        "SELECT slots.id AS slot_id, slots.start_ts AS start_ts, slots.end_ts AS end_ts, "
-        "       m.id AS master_id, m.full_name AS master_name, m.specialization AS specialization "
-        "FROM masters m "
-        "JOIN schedule_slots slots ON slots.master_id = m.id "
-        "LEFT JOIN appointments a ON a.slot_id = slots.id "
-        "WHERE m.salon_id = ? AND m.active = TRUE AND slots.is_booked = FALSE "
-        "      AND a.slot_id IS NULL AND slots.start_ts >= now() "
-        "ORDER BY slots.start_ts "
-        "LIMIT ?"
-    )
-    query = execute_select(sql, [salon_id, limit], "Поиск свободных слотов")
+    conditions = [
+        "m.salon_id = ?",
+        "m.active = TRUE",
+        "slots.is_booked = FALSE",
+        "a.slot_id IS NULL",
+    ]
+    params = [salon_id]
+
+    if master_id:
+        conditions.append("m.id = ?")
+        params.append(master_id)
+
+    if start_dt is not None:
+        conditions.append("slots.start_ts >= ?")
+        params.append(start_dt)
+    else:
+        conditions.append("slots.start_ts >= now()")
+
+    if end_dt is not None:
+        conditions.append("slots.start_ts <= ?")
+        params.append(end_dt)
+
+    sql = [
+        "SELECT slots.id AS slot_id, slots.start_ts AS start_ts, slots.end_ts AS end_ts,",
+        "       m.id AS master_id, m.full_name AS master_name, m.specialization AS specialization",
+        "FROM masters m",
+        "JOIN schedule_slots slots ON slots.master_id = m.id",
+        "LEFT JOIN appointments a ON a.slot_id = slots.id",
+        "WHERE ",
+        " AND ".join(conditions),
+        "ORDER BY slots.start_ts",
+        "LIMIT ?",
+    ]
+    params.append(limit)
+
+    query = execute_select(" ".join(sql), params, "Поиск свободных слотов")
     slots = []
     if query is not None:
         while query.next():
@@ -365,6 +396,30 @@ def fetch_available_services_for_salon(salon_id):
                 }
             )
     return services
+
+
+def fetch_masters_for_salon(salon_id):
+    if salon_id is None:
+        return []
+
+    sql = (
+        "SELECT id, full_name, specialization "
+        "FROM masters "
+        "WHERE salon_id = ? AND active = TRUE "
+        "ORDER BY full_name"
+    )
+    query = execute_select(sql, [salon_id], "Загрузка мастеров салона")
+    masters = []
+    if query is not None:
+        while query.next():
+            masters.append(
+                {
+                    "id": query.value("id"),
+                    "full_name": query.value("full_name"),
+                    "specialization": query.value("specialization"),
+                }
+            )
+    return masters
 
 
 def format_price(value):
@@ -441,6 +496,149 @@ def choose_slot_for_booking(slots, salon_name="", service_name=""):
     return slots[selected_index]
 
 
+def open_schedule_dialog(salon_id, salon_name="", service_name=""):
+    dialog = load_ui("ui/ScheduleDialog.ui")
+    if dialog is None or not isinstance(dialog, QDialog):
+        QMessageBox.warning(
+            main,
+            "Расписание",
+            "Не удалось открыть окно расписания. Повторите попытку позже.",
+        )
+        return None
+
+    dialog.setParent(main)
+    dialog.setModal(True)
+    dialog.selected_slot = None
+
+    table = getattr(dialog, "tblSchedule", None)
+    master_combo = getattr(dialog, "cbMasterFilter", None)
+    start_edit = getattr(dialog, "deStartDate", None)
+    end_edit = getattr(dialog, "deEndDate", None)
+    btn_select = getattr(dialog, "btnSelectSlot", None)
+    btn_cancel = getattr(dialog, "btnCancel", None)
+    lbl_salon = getattr(dialog, "lblSalonInfo", None)
+    lbl_service = getattr(dialog, "lblServiceInfo", None)
+
+    if lbl_salon is not None:
+        salon_text = salon_name or "Неизвестный салон"
+        lbl_salon.setText(f"Салон: {salon_text}")
+    if lbl_service is not None:
+        service_text = service_name or "Не выбрана"
+        lbl_service.setText(f"Услуга: {service_text}")
+
+    masters = fetch_masters_for_salon(salon_id)
+    if master_combo is not None:
+        master_combo.clear()
+        master_combo.addItem("Все мастера", None)
+        for master in masters:
+            label_parts = [master.get("full_name") or "Мастер"]
+            specialization = master.get("specialization")
+            if specialization:
+                label_parts.append(f"{specialization}")
+            master_combo.addItem(" — ".join(label_parts), master.get("id"))
+
+    today = QDate.currentDate()
+    default_end = today.addDays(30)
+    if start_edit is not None:
+        start_edit.setDate(today)
+    if end_edit is not None:
+        end_edit.setDate(default_end if default_end >= today else today)
+
+    headers = ["Начало", "Окончание", "Мастер", "Специализация"]
+
+    def ensure_valid_range(changed="start"):
+        if start_edit is None or end_edit is None:
+            return
+        start_date = start_edit.date()
+        end_date = end_edit.date()
+        if start_date <= end_date:
+            return
+        if changed == "start":
+            end_edit.blockSignals(True)
+            end_edit.setDate(start_date)
+            end_edit.blockSignals(False)
+        else:
+            start_edit.blockSignals(True)
+            start_edit.setDate(end_date)
+            start_edit.blockSignals(False)
+
+    def current_filters():
+        selected_master = None
+        if master_combo is not None and master_combo.count() > 0:
+            selected_master = master_combo.currentData()
+        start_dt = None
+        end_dt = None
+        if start_edit is not None:
+            start_dt = QDateTime(start_edit.date(), QTime(0, 0, 0))
+        if end_edit is not None:
+            end_dt = QDateTime(end_edit.date(), QTime(23, 59, 59))
+        return selected_master, start_dt, end_dt
+
+    def refresh_slots():
+        if table is None:
+            return
+        master_id, start_dt, end_dt = current_filters()
+        slots = fetch_available_slots(
+            salon_id,
+            limit=200,
+            master_id=master_id if master_id else None,
+            start_dt=start_dt,
+            end_dt=end_dt,
+        )
+        rows = []
+        for slot in slots:
+            rows.append(
+                [
+                    slot.get("start_ts"),
+                    slot.get("end_ts"),
+                    slot.get("master_name"),
+                    slot.get("specialization"),
+                ]
+            )
+        populate_table(table, headers, rows, slots)
+
+    def handle_select():
+        selection = get_selected_row_payload(table)
+        if not selection:
+            QMessageBox.information(dialog, "Выбор слота", "Выберите время в расписании.")
+            return
+        _, payload = selection
+        dialog.selected_slot = payload
+        dialog.accept()
+
+    if master_combo is not None:
+        master_combo.currentIndexChanged.connect(refresh_slots)
+
+    if start_edit is not None:
+        def on_start_changed(*_):
+            ensure_valid_range("start")
+            refresh_slots()
+
+        start_edit.dateChanged.connect(on_start_changed)
+
+    if end_edit is not None:
+        def on_end_changed(*_):
+            ensure_valid_range("end")
+            refresh_slots()
+
+        end_edit.dateChanged.connect(on_end_changed)
+
+    if btn_select is not None:
+        btn_select.clicked.connect(handle_select)
+
+    if btn_cancel is not None:
+        btn_cancel.clicked.connect(dialog.reject)
+
+    if table is not None:
+        table.itemDoubleClicked.connect(lambda *_: handle_select())
+
+    refresh_slots()
+
+    if dialog.exec() == QDialog.Accepted:
+        return getattr(dialog, "selected_slot", None)
+    return None
+
+
 def read_catalog_filters_from_ui():
     combo = getattr(main, "cbCity", None)
     search_edit = getattr(main, "leSearch", None)
@@ -503,17 +701,8 @@ def on_book_now():
         QMessageBox.warning(main, "Запись", "Недостаточно данных для создания записи.")
         return
 
-    available_slots = fetch_available_slots(salon_id)
-    if not available_slots:
-        QMessageBox.information(
-            main,
-            "Свободные слоты",
-            "Нет свободных времён для выбранного салона. Попробуйте выбрать другую услугу.",
-        )
-        return
-
-    slot_info = choose_slot_for_booking(
-        available_slots,
+    slot_info = open_schedule_dialog(
+        salon_id,
         payload.get("salon_name"),
         payload.get("service_name"),
     )
