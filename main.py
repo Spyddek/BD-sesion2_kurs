@@ -33,7 +33,13 @@ ROLE_CONFIGS = {
 
 current_user = None
 current_role = None
-catalog_filter_state = {"city": None, "search": ""}
+catalog_filter_state = {
+    "city": None,
+    "search": "",
+    "price_min": None,
+    "price_max": None,
+    "service_id": None,
+}
 catalog_filters_initialized = False
 
 def load_ui(path):
@@ -194,15 +200,107 @@ def populate_city_filter(selected_city=None):
     combo.blockSignals(False)
 
 
+def fetch_catalog_price_values():
+    sql = (
+        "SELECT DISTINCT COALESCE(ss.price, srv.base_price) AS price "
+        "FROM salon_services ss "
+        "JOIN services srv ON srv.id = ss.service_id "
+        "WHERE COALESCE(ss.price, srv.base_price) IS NOT NULL "
+        "ORDER BY price"
+    )
+    query = execute_select(sql, context="Загрузка цен каталога")
+    prices = []
+    seen = set()
+    if query is not None:
+        while query.next():
+            price_value = parse_decimal(query.value("price"), None)
+            if price_value is None or price_value in seen:
+                continue
+            prices.append(price_value)
+            seen.add(price_value)
+    return prices
+
+
+def populate_price_filters(selected_min=None, selected_max=None):
+    combo_min = getattr(main, "cbCPriceMin", None)
+    combo_max = getattr(main, "cbPriceMax", None)
+
+    if combo_min is None and combo_max is None:
+        return
+
+    prices = fetch_catalog_price_values()
+
+    def fill_combo(combo, placeholder, selected_value):
+        if combo is None:
+            return
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(placeholder, None)
+        for price in prices:
+            combo.addItem(format_price(price), price)
+        index = 0
+        if selected_value is not None:
+            found_index = combo.findData(selected_value)
+            if found_index != -1:
+                index = found_index
+        combo.setCurrentIndex(index)
+        combo.blockSignals(False)
+
+    fill_combo(combo_min, "Без минимума", selected_min)
+    fill_combo(combo_max, "Без максимума", selected_max)
+
+
+def populate_service_filter(selected_service_id=None):
+    combo = getattr(main, "cbService", None)
+    if combo is None:
+        return
+
+    sql = (
+        "SELECT DISTINCT srv.id AS service_id, srv.name AS service_name "
+        "FROM services srv "
+        "JOIN salon_services ss ON ss.service_id = srv.id "
+        "ORDER BY srv.name"
+    )
+    query = execute_select(sql, context="Загрузка списка услуг")
+    services = []
+    if query is not None:
+        while query.next():
+            services.append(
+                {
+                    "id": query.value("service_id"),
+                    "name": query.value("service_name"),
+                }
+            )
+
+    combo.blockSignals(True)
+    combo.clear()
+    combo.addItem("Все услуги", None)
+    for service in services:
+        combo.addItem(service["name"], service["id"])
+
+    index = 0
+    if selected_service_id is not None:
+        found_index = combo.findData(selected_service_id)
+        if found_index != -1:
+            index = found_index
+    combo.setCurrentIndex(index)
+    combo.blockSignals(False)
+
+
 def load_catalog(update_filters=False):
     global catalog_filters_initialized
 
     table = getattr(main, "tblCatalog", None)
-    headers = ["Наименование", "Город", "Цена"]
+    headers = ["Услуга", "Салон", "Город", "Цена", "Описание"]
     search_edit = getattr(main, "leSearch", None)
 
     if update_filters or not catalog_filters_initialized:
         populate_city_filter(catalog_filter_state.get("city"))
+        populate_price_filters(
+            catalog_filter_state.get("price_min"),
+            catalog_filter_state.get("price_max"),
+        )
+        populate_service_filter(catalog_filter_state.get("service_id"))
         catalog_filters_initialized = True
 
     if search_edit is not None:
@@ -210,9 +308,10 @@ def load_catalog(update_filters=False):
         if search_edit.text() != current_text:
             search_edit.setText(current_text)
 
+    effective_price_expr = "COALESCE(ss.price, srv.base_price)"
     sql = (
         "SELECT srv.name AS service_name, salons.name AS salon_name, salons.city AS city, "
-        "       COALESCE(ss.price, srv.base_price) AS price, "
+        f"       {effective_price_expr} AS price, srv.description AS description, "
         "       salons.id AS salon_id, srv.id AS service_id "
         "FROM salon_services ss "
         "JOIN salons ON salons.id = ss.salon_id "
@@ -223,6 +322,9 @@ def load_catalog(update_filters=False):
     conditions = []
     selected_city = catalog_filter_state.get("city")
     search_text = (catalog_filter_state.get("search", "") or "").strip()
+    price_min = catalog_filter_state.get("price_min")
+    price_max = catalog_filter_state.get("price_max")
+    service_id = catalog_filter_state.get("service_id")
 
     if selected_city:
         conditions.append("salons.city = ?")
@@ -232,6 +334,18 @@ def load_catalog(update_filters=False):
         like_pattern = f"%{search_text}%"
         conditions.append("(srv.name ILIKE ? OR salons.name ILIKE ?)")
         params.extend([like_pattern, like_pattern])
+
+    if price_min is not None:
+        conditions.append(f"{effective_price_expr} >= ?")
+        params.append(float(price_min))
+
+    if price_max is not None:
+        conditions.append(f"{effective_price_expr} <= ?")
+        params.append(float(price_max))
+
+    if service_id is not None:
+        conditions.append("srv.id = ?")
+        params.append(service_id)
 
     if conditions:
         sql += " WHERE " + " AND ".join(conditions)
@@ -245,8 +359,10 @@ def load_catalog(update_filters=False):
         while query.next():
             rows.append([
                 query.value("service_name"),
+                query.value("salon_name"),
                 query.value("city"),
                 query.value("price"),
+                query.value("description"),
             ])
             payloads.append(
                 {
@@ -254,6 +370,8 @@ def load_catalog(update_filters=False):
                     "service_id": query.value("service_id"),
                     "salon_name": query.value("salon_name"),
                     "service_name": query.value("service_name"),
+                    "price": query.value("price"),
+                    "description": query.value("description"),
                 }
             )
     populate_table(table, headers, rows, payloads)
@@ -444,6 +562,9 @@ def choose_slot_for_booking(slots, salon_name="", service_name=""):
 def read_catalog_filters_from_ui():
     combo = getattr(main, "cbCity", None)
     search_edit = getattr(main, "leSearch", None)
+    price_min_combo = getattr(main, "cbCPriceMin", None)
+    price_max_combo = getattr(main, "cbPriceMax", None)
+    service_combo = getattr(main, "cbService", None)
 
     city_value = None
     if combo is not None and combo.count() > 0:
@@ -455,13 +576,51 @@ def read_catalog_filters_from_ui():
     if search_edit is not None:
         search_text = search_edit.text().strip()
 
-    return city_value, search_text
+    price_min = None
+    if price_min_combo is not None and price_min_combo.count() > 0:
+        data = price_min_combo.currentData()
+        if data is not None:
+            price_min = data
+
+    price_max = None
+    if price_max_combo is not None and price_max_combo.count() > 0:
+        data = price_max_combo.currentData()
+        if data is not None:
+            price_max = data
+
+    service_id = None
+    if service_combo is not None and service_combo.count() > 0:
+        data = service_combo.currentData()
+        if data is not None:
+            service_id = data
+
+    return {
+        "city": city_value,
+        "search": search_text,
+        "price_min": price_min,
+        "price_max": price_max,
+        "service_id": service_id,
+    }
 
 
 def on_apply_filter():
-    city_value, search_text = read_catalog_filters_from_ui()
-    catalog_filter_state["city"] = city_value
-    catalog_filter_state["search"] = search_text
+    filters = read_catalog_filters_from_ui()
+
+    price_min = filters.get("price_min")
+    price_max = filters.get("price_max")
+    if price_min is not None and price_max is not None and price_min > price_max:
+        QMessageBox.warning(
+            main,
+            "Некорректный диапазон",
+            "Минимальная цена не может быть больше максимальной.",
+        )
+        populate_price_filters(
+            catalog_filter_state.get("price_min"),
+            catalog_filter_state.get("price_max"),
+        )
+        return
+
+    catalog_filter_state.update(filters)
 
     load_catalog()
 
@@ -703,6 +862,9 @@ def setup_role(role, user=None):
     catalog_filters_initialized = False
     catalog_filter_state["city"] = None
     catalog_filter_state["search"] = ""
+    catalog_filter_state["price_min"] = None
+    catalog_filter_state["price_max"] = None
+    catalog_filter_state["service_id"] = None
 
     tabs = {
         "catalog": getattr(main, "tabCatalog", None),
@@ -1176,6 +1338,15 @@ if hasattr(main, "leSearch"):
 
 if hasattr(main, "cbCity"):
     main.cbCity.currentIndexChanged.connect(lambda *_: on_apply_filter())
+
+if hasattr(main, "cbCPriceMin"):
+    main.cbCPriceMin.currentIndexChanged.connect(lambda *_: on_apply_filter())
+
+if hasattr(main, "cbPriceMax"):
+    main.cbPriceMax.currentIndexChanged.connect(lambda *_: on_apply_filter())
+
+if hasattr(main, "cbService"):
+    main.cbService.currentIndexChanged.connect(lambda *_: on_apply_filter())
 
 configure_role_controls(None)
 
