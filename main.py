@@ -663,7 +663,7 @@ def on_book_now():
 
     row = selected_rows[0].row()
     item = table.item(row, 0)
-    payload = item.data(Qt.UserRole) if item is not None else None
+    payload = item.data(Qt.UserRole + 1) if item is not None else None
     if not payload:
         QMessageBox.warning(main, "Запись", "Не удалось определить выбранную услугу.")
         return
@@ -845,7 +845,7 @@ def get_selected_row_payload(table):
     item = table.item(row, 0)
     if item is None:
         return None
-    payload = item.data(Qt.UserRole)
+    payload = item.data(Qt.UserRole + 1)
     if payload is None:
         return None
     return row, payload
@@ -1007,7 +1007,14 @@ if not connect_db():
     sys.exit(1)
 
 login = load_ui("ui/LoginWindow.ui")
+if login is None:
+    QMessageBox.critical(None, "Ошибка интерфейса", "Не удалось загрузить окно входа.")
+    sys.exit(1)
+
 main = load_ui("ui/MainWindow.ui")
+if main is None:
+    QMessageBox.critical(None, "Ошибка интерфейса", "Не удалось загрузить главное окно приложения.")
+    sys.exit(1)
 
 login.btnLogin.clicked.connect(on_login)
 def on_cancel_booking():
