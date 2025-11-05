@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QLabel,
     QDateTimeEdit,
+    QCheckBox,
 )
 from PySide6.QtUiTools import QUiLoader
 from PySide6.QtCore import QFile, QDate, QTime, QDateTime, Qt
@@ -726,17 +727,14 @@ def fetch_available_services_for_salon(salon_id):
 def fetch_masters_for_salon(salon_id):
     if salon_id is None:
         return []
-def fetch_masters_for_salon_and_service(salon_id, service_id):
-    if salon_id is None or service_id is None:
-        return []
+
     sql = (
-        "SELECT m.id, m.full_name, m.specialization "
-        "FROM masters m "
-        "JOIN master_services ms ON ms.master_id = m.id "
-        "WHERE m.salon_id = ? AND m.active = TRUE AND ms.service_id = ? "
-        "ORDER BY m.full_name"
+        "SELECT id, full_name, specialization "
+        "FROM masters "
+        "WHERE salon_id = ? AND active = TRUE "
+        "ORDER BY full_name"
     )
-    query = execute_select(sql, [salon_id, service_id], "Загрузка мастеров для услуги салона")
+    query = execute_select(sql, [salon_id], "Загрузка мастеров салона")
     masters = []
     if query is not None:
         while query.next():
@@ -750,13 +748,17 @@ def fetch_masters_for_salon_and_service(salon_id, service_id):
     return masters
 
 
+def fetch_masters_for_salon_and_service(salon_id, service_id):
+    if salon_id is None or service_id is None:
+        return []
     sql = (
-        "SELECT id, full_name, specialization "
-        "FROM masters "
-        "WHERE salon_id = ? AND active = TRUE "
-        "ORDER BY full_name"
+        "SELECT m.id, m.full_name, m.specialization "
+        "FROM masters m "
+        "JOIN master_services ms ON ms.master_id = m.id "
+        "WHERE m.salon_id = ? AND m.active = TRUE AND ms.service_id = ? "
+        "ORDER BY m.full_name"
     )
-    query = execute_select(sql, [salon_id], "Загрузка мастеров салона")
+    query = execute_select(sql, [salon_id, service_id], "Загрузка мастеров для услуги салона")
     masters = []
     if query is not None:
         while query.next():
@@ -1023,6 +1025,39 @@ class CreateSlotDialog(QDialog):
         start_dt = self.start_edit.dateTime()
         end_dt = start_dt.addSecs(int(self.duration_min) * 60)
         self.end_label.setText(end_dt.toString("dd.MM.yyyy HH:mm"))
+
+    def accept(self):
+        master_data = self.master_combo.currentData()
+        if not master_data or not master_data.get("id"):
+            QMessageBox.warning(self, "Добавление времени", "Выберите мастера.")
+            return
+
+        start_dt = self.start_edit.dateTime()
+        if start_dt < QDateTime.currentDateTime():
+            QMessageBox.warning(
+                self,
+                "Добавление времени",
+                "Нельзя создать слот в прошлом. Выберите другое время.",
+            )
+            return
+
+        seconds = start_dt.time().second()
+        if seconds:
+            start_dt = start_dt.addSecs(-seconds)
+
+        end_dt = start_dt.addSecs(int(self.duration_min) * 60)
+
+        self._result = {
+            "master": master_data,
+            "master_id": master_data.get("id"),
+            "start_ts": start_dt,
+            "end_ts": end_dt,
+        }
+
+        super().accept()
+
+    def get_data(self):
+        return self._result
 class AssignMastersDialog(QDialog):
     def __init__(self, parent=None, salon=None, service=None):
         super().__init__(parent)
@@ -1118,40 +1153,6 @@ def on_assign_masters_to_service(salon, service):
     QMessageBox.information(main, "Назначение мастеров", "Назначения сохранены.")
 
 
-    def accept(self):
-        master_data = self.master_combo.currentData()
-        if not master_data or not master_data.get("id"):
-            QMessageBox.warning(self, "Добавление времени", "Выберите мастера.")
-            return
-
-        start_dt = self.start_edit.dateTime()
-        if start_dt < QDateTime.currentDateTime():
-            QMessageBox.warning(
-                self,
-                "Добавление времени",
-                "Нельзя создать слот в прошлом. Выберите другое время.",
-            )
-            return
-
-        seconds = start_dt.time().second()
-        if seconds:
-            start_dt = start_dt.addSecs(-seconds)
-
-        end_dt = start_dt.addSecs(int(self.duration_min) * 60)
-
-        self._result = {
-            "master": master_data,
-            "master_id": master_data.get("id"),
-            "start_ts": start_dt,
-            "end_ts": end_dt,
-        }
-
-        super().accept()
-
-    def get_data(self):
-        return self._result
-
-
 def create_service_via_dialog(parent):
     dialog = CreateServiceDialog(parent)
     if dialog.exec() != QDialog.Accepted:
@@ -1235,7 +1236,7 @@ def create_slot_for_service(context):
                 "Добавление времени",
                 "В салоне нет активных мастеров. Добавьте мастеров прежде, чем создавать время.",
             )
-        return False
+            return False
 
     dialog = CreateSlotDialog(main, context=context, masters=masters)
     if dialog.exec() != QDialog.Accepted:
