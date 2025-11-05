@@ -299,7 +299,7 @@ def load_catalog(update_filters=False):
 
 def load_bookings(user_id):
     table = getattr(main, "tblBookings", None)
-    headers = ["Номер", "Салон", "Услуга", "Начало", "Статус"]
+    headers = ["Салон", "Услуга", "Начало", "Статус"]
 
     if user_id is None:
         populate_table(table, headers, [])
@@ -317,16 +317,18 @@ def load_bookings(user_id):
     )
     query = execute_select(sql, [user_id], "Загрузка записей клиента")
     rows = []
+    payloads = []
     if query is not None:
         while query.next():
+            appointment_id = query.value("id")
             rows.append([
-                query.value("id"),
                 query.value("salon_name"),
                 query.value("service_name"),
                 query.value("start_ts"),
                 query.value("status"),
             ])
-    populate_table(table, headers, rows)
+            payloads.append({"appointment_id": appointment_id})
+    populate_table(table, headers, rows, payloads)
 
 
 def load_user_info(user_id):
@@ -1010,9 +1012,26 @@ def on_cancel_booking():
         QMessageBox.warning(main, "Отмена записи", "Не удалось определить выбранную запись.")
         return
 
-    try:
-        appointment_id = int(id_item.text())
-    except (TypeError, ValueError):
+    payload = id_item.data(Qt.UserRole)
+    appointment_id = None
+    if isinstance(payload, dict):
+        appointment_id = payload.get("appointment_id")
+    elif payload is not None:
+        appointment_id = payload
+
+    if appointment_id is None:
+        try:
+            appointment_id = int(id_item.text())
+        except (TypeError, ValueError):
+            appointment_id = None
+
+    if not isinstance(appointment_id, int):
+        try:
+            appointment_id = int(appointment_id)
+        except (TypeError, ValueError):
+            appointment_id = None
+
+    if appointment_id is None:
         QMessageBox.warning(main, "Отмена записи", "Некорректный идентификатор записи.")
         return
 
