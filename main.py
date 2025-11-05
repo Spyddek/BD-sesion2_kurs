@@ -177,6 +177,95 @@ def execute_action(sql, params=None, context=""):
     return True
 
 
+def cleanup_client_related_data(user_id):
+    status_select, status_join = build_status_select_clause("status_display")
+    appointments_sql = (
+        f"SELECT a.id, a.slot_id, {status_select} "
+        "FROM appointments a "
+        f"{status_join}"
+        "WHERE a.client_id = ?"
+    )
+
+    appointments_query = execute_select(
+        appointments_sql,
+        [user_id],
+        "Получение записей пользователя перед удалением",
+    )
+    if appointments_query is None:
+        return False
+
+    appointments = []
+    cancellable_ids = []
+    slots_to_release = set()
+
+    while appointments_query.next():
+        appointment_id = appointments_query.value("id")
+        slot_id = appointments_query.value("slot_id")
+        status_value = normalize_status(appointments_query.value("status_display"))
+
+        if appointment_id is not None:
+            try:
+                appointments.append(int(appointment_id))
+            except (TypeError, ValueError):
+                pass
+
+        if status_value in ALLOWED_CANCELLATION_STATUSES and appointment_id is not None:
+            try:
+                cancellable_ids.append(int(appointment_id))
+            except (TypeError, ValueError):
+                pass
+
+        if slot_id is not None:
+            try:
+                slots_to_release.add(int(slot_id))
+            except (TypeError, ValueError):
+                pass
+
+    if appointments:
+        if not execute_action(
+            (
+                "DELETE FROM reviews "
+                "WHERE appointment_id IN (SELECT id FROM appointments WHERE client_id = ?)"
+            ),
+            [user_id],
+            "Удаление отзывов, связанных с записями пользователя",
+        ):
+            return False
+
+    if not execute_action(
+        "DELETE FROM reviews WHERE client_id = ?",
+        [user_id],
+        "Удаление отзывов пользователя",
+    ):
+        return False
+
+    for appointment_id in cancellable_ids:
+        query = QSqlQuery()
+        query.prepare("SELECT cancel_appointment(?)")
+        query.addBindValue(appointment_id)
+        if not query.exec():
+            show_db_error(query, "Отмена записей пользователя")
+            return False
+
+    if appointments:
+        if not execute_action(
+            "DELETE FROM appointments WHERE client_id = ?",
+            [user_id],
+            "Удаление записей пользователя",
+        ):
+            return False
+
+    for slot_id in slots_to_release:
+        if not execute_action(
+            "UPDATE schedule_slots SET is_booked = FALSE WHERE id = ?",
+            [slot_id],
+            "Освобождение слота пользователя",
+        ):
+            return False
+
+    return True
+
+
 @lru_cache(maxsize=None)
 def get_table_columns(table_name):
     query = execute_select(
@@ -1513,7 +1602,31 @@ def on_delete_user():
         )
         return
 
+    user_query = execute_select(
+        (
+            "SELECT u.full_name, r.code AS role_code "
+            "FROM users u JOIN roles r ON r.id = u.role_id "
+            "WHERE u.id = ?"
+        ),
+        [user_id],
+        "Получение информации о пользователе перед удалением",
+    )
+
+    if user_query is None or not user_query.next():
+        QMessageBox.warning(
+            main,
+            "Удаление пользователя",
+            "Не удалось получить текущие данные пользователя.",
+        )
+        return
+
     user_name = name_item.text() if name_item else "пользователь"
+    db_full_name = user_query.value("full_name")
+    if db_full_name:
+        user_name = db_full_name
+
+    role_code = user_query.value("role_code")
+
     confirm = QMessageBox.question(
         main,
         "Удаление пользователя",
@@ -1523,6 +1636,10 @@ def on_delete_user():
     )
     if confirm != QMessageBox.Yes:
         return
+
+    if isinstance(role_code, str) and role_code.strip().lower() == "client":
+        if not cleanup_client_related_data(user_id):
+            return
 
     if not execute_action(
         "DELETE FROM users WHERE id = ?",
