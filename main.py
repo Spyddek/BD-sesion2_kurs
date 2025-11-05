@@ -29,15 +29,24 @@ ROLE_ALIASES = {
 }
 
 ROLE_CONFIGS = {
-    "client": {"tabs": ("catalog", "book"), "title": "Smart-SPA — Клиент"},
+    "client": {"tabs": ("catalog", "book", "user"), "title": "Smart-SPA — Клиент"},
     "salon": {"tabs": ("salon", "catalog"), "title": "Smart-SPA — Салон"},
     "admin": {"tabs": ("admin",), "title": "Smart-SPA — Администратор"},
 }
 
 current_user = None
 current_role = None
+current_title_base = "Smart-SPA"
 catalog_filter_state = {"city": None, "search": ""}
 catalog_filters_initialized = False
+
+
+def refresh_window_title():
+    title = current_title_base or "Smart-SPA"
+    if current_user and current_user.get("full_name"):
+        title = f"{title} ({current_user['full_name']})"
+    if 'main' in globals() and main is not None:
+        main.setWindowTitle(title)
 
 def load_ui(path):
     if not os.path.exists(path):
@@ -102,6 +111,119 @@ def populate_table(table, headers, rows, row_payloads=None):
     table.blockSignals(False)
 
 
+def load_user_info(user_id):
+    table = getattr(main, "tblUserInfo", None)
+    headers = ["ФИО", "Email", "Tel"]
+
+    if table is None:
+        return
+
+    rows = []
+    if user_id:
+        query = execute_select(
+            "SELECT full_name, email, phone FROM users WHERE id = ?",
+            [user_id],
+            "Загрузка данных пользователя",
+        )
+        if query is not None and query.next():
+            rows.append([
+                query.value("full_name"),
+                query.value("email"),
+                query.value("phone"),
+            ])
+
+    populate_table(table, headers, rows)
+
+
+def on_edit_user_info():
+    if current_user is None or current_role != "client":
+        QMessageBox.information(
+            main,
+            "Изменение данных",
+            "Редактировать данные может только авторизованный клиент.",
+        )
+        return
+
+    user_id = current_user.get("id") if current_user else None
+    if not user_id:
+        QMessageBox.warning(
+            main,
+            "Изменение данных",
+            "Не удалось определить текущего пользователя.",
+        )
+        return
+
+    query = execute_select(
+        "SELECT full_name, email, phone FROM users WHERE id = ?",
+        [user_id],
+        "Получение данных пользователя",
+    )
+    if query is None or not query.next():
+        QMessageBox.warning(
+            main,
+            "Изменение данных",
+            "Не удалось загрузить текущие данные пользователя.",
+        )
+        return
+
+    current_full_name = query.value("full_name") or ""
+    current_email = query.value("email") or ""
+    current_phone = query.value("phone") or ""
+
+    new_full_name, ok = QInputDialog.getText(
+        main,
+        "Изменение данных",
+        "Введите новое ФИО:",
+        text=current_full_name,
+    )
+    if not ok:
+        return
+    new_full_name = (new_full_name or "").strip()
+    if not new_full_name:
+        QMessageBox.warning(main, "Изменение данных", "ФИО не может быть пустым.")
+        return
+
+    new_email, ok = QInputDialog.getText(
+        main,
+        "Изменение данных",
+        "Введите новый email (можно оставить пустым):",
+        text=current_email,
+    )
+    if not ok:
+        return
+    new_email = (new_email or "").strip()
+
+    new_phone, ok = QInputDialog.getText(
+        main,
+        "Изменение данных",
+        "Введите новый телефон (можно оставить пустым):",
+        text=current_phone,
+    )
+    if not ok:
+        return
+    new_phone = (new_phone or "").strip()
+
+    if not execute_action(
+        "UPDATE users SET full_name = ?, email = ?, phone = ? WHERE id = ?",
+        [new_full_name, new_email or None, new_phone or None, user_id],
+        "Обновление данных пользователя",
+    ):
+        return
+
+    current_user.update(
+        {
+            "full_name": new_full_name,
+            "email": new_email if new_email else None,
+            "phone": new_phone if new_phone else None,
+        }
+    )
+
+    load_user_info(user_id)
+    refresh_window_title()
+
+    QMessageBox.information(main, "Изменение данных", "Данные успешно обновлены.")
+
+
 def show_db_error(query, context):
     error_text = query.lastError().text() if query.lastError().isValid() else ""
     details = f"{context}." if context else "Ошибка выполнения запроса."
@@ -149,7 +271,7 @@ def find_user(login_text):
         return None
 
     sql = (
-        "SELECT u.id, u.full_name, u.password_hash, r.code AS role_code, r.name AS role_name "
+        "SELECT u.id, u.full_name, u.email, u.phone, u.password_hash, r.code AS role_code, r.name AS role_name "
         "FROM users u "
         "JOIN roles r ON r.id = u.role_id "
         "WHERE u.phone = ? OR u.email = ? OR lower(u.full_name) = lower(?) "
@@ -162,6 +284,8 @@ def find_user(login_text):
         return {
             "id": query.value("id"),
             "full_name": query.value("full_name"),
+            "email": query.value("email"),
+            "phone": query.value("phone"),
             "password_hash": query.value("password_hash"),
             "role_code": query.value("role_code"),
             "role_name": query.value("role_name"),
@@ -689,6 +813,8 @@ def get_selected_row_payload(table):
 
 
 def load_data_for_role(role, user):
+    load_user_info(user["id"] if user else None)
+
     if role == "client":
         load_catalog(update_filters=True)
         load_bookings(user["id"] if user else None)
@@ -717,6 +843,8 @@ def configure_role_controls(role):
         main.btnAddBooking.setEnabled(client_only)
     if hasattr(main, "btnCancelBooking"):
         main.btnCancelBooking.setEnabled(client_only)
+    if hasattr(main, "btnResetInfo"):
+        main.btnResetInfo.setEnabled(client_only and current_user is not None)
 
     if hasattr(main, "btnAddService"):
         main.btnAddService.setEnabled(manage_services)
@@ -732,7 +860,7 @@ def configure_role_controls(role):
 
 
 def setup_role(role, user=None):
-    global current_role, catalog_filters_initialized
+    global current_role, catalog_filters_initialized, current_title_base
 
     catalog_filters_initialized = False
     catalog_filter_state["city"] = None
@@ -743,6 +871,7 @@ def setup_role(role, user=None):
         "book": getattr(main, "tabBookings", None),
         "salon": getattr(main, "tabSalon", None),
         "admin": getattr(main, "tabAdmin", None),
+        "user": getattr(main, "tabUser", None),
     }
 
     for widget in tabs.values():
@@ -751,7 +880,7 @@ def setup_role(role, user=None):
             if index != -1:
                 main.twMain.setTabVisible(index, False)
 
-    def show_tabs(keys, title):
+    def show_tabs(keys):
         first_visible = None
         for key in keys:
             widget = tabs.get(key)
@@ -767,25 +896,22 @@ def setup_role(role, user=None):
         if first_visible is not None:
             main.twMain.setCurrentWidget(first_visible)
 
-        window_title = title
-        if user and user.get("full_name"):
-            window_title = f"{title} ({user['full_name']})"
-        main.setWindowTitle(window_title)
-
     role_key = (role or "").strip().casefold()
     canonical_role = ROLE_ALIASES.get(role_key)
 
     if canonical_role:
         config = ROLE_CONFIGS[canonical_role]
-        show_tabs(config["tabs"], config["title"])
+        show_tabs(config["tabs"])
+        current_title_base = config["title"]
     else:
         available_tabs = tuple(key for key, widget in tabs.items() if widget)
-        title = f"Smart-SPA — {role or 'Пользователь'}"
-        show_tabs(available_tabs, title)
+        current_title_base = f"Smart-SPA — {role or 'Пользователь'}"
+        show_tabs(available_tabs)
 
     current_role = canonical_role
     configure_role_controls(canonical_role)
     load_data_for_role(canonical_role, user)
+    refresh_window_title()
 
 
 def on_login():
@@ -1222,6 +1348,9 @@ if hasattr(main, "btnDeleteUser"):
 
 if hasattr(main, "btnApproveReview"):
     main.btnApproveReview.clicked.connect(on_approve_review)
+
+if hasattr(main, "btnResetInfo"):
+    main.btnResetInfo.clicked.connect(on_edit_user_info)
 
 if hasattr(main, "leSearch"):
     main.leSearch.returnPressed.connect(on_apply_filter)
