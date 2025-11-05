@@ -11,6 +11,10 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QTableWidget,
     QInputDialog,
+    QDialog,
+    QFormLayout,
+    QLineEdit,
+    QDialogButtonBox,
 )
 from PySide6.QtUiTools import QUiLoader
 from PySide6.QtCore import QFile, QDate, QTime, QDateTime, Qt
@@ -29,7 +33,7 @@ ROLE_ALIASES = {
 }
 
 ROLE_CONFIGS = {
-    "client": {"tabs": ("catalog", "book"), "title": "Smart-SPA — Клиент"},
+    "client": {"tabs": ("catalog", "book", "user"), "title": "Smart-SPA — Клиент"},
     "salon": {"tabs": ("salon", "catalog"), "title": "Smart-SPA — Салон"},
     "admin": {"tabs": ("admin",), "title": "Smart-SPA — Администратор"},
 }
@@ -325,6 +329,39 @@ def load_bookings(user_id):
     populate_table(table, headers, rows)
 
 
+def load_user_info(user_id):
+    table = getattr(main, "tblUserInfo", None)
+    headers = ["ФИО", "Email", "Тел"]
+
+    if table is None:
+        return
+
+    if hasattr(table, "verticalHeader"):
+        header = table.verticalHeader()
+        if header is not None:
+            header.setVisible(False)
+
+    if user_id is None:
+        populate_table(table, headers, [])
+        return
+
+    query = execute_select(
+        "SELECT full_name, email, phone FROM users WHERE id = ?",
+        [user_id],
+        "Загрузка данных клиента",
+    )
+
+    rows = []
+    if query is not None and query.next():
+        rows.append([
+            query.value("full_name"),
+            query.value("email"),
+            query.value("phone"),
+        ])
+
+    populate_table(table, headers, rows)
+
+
 def fetch_available_slots(salon_id, limit=20):
     if salon_id is None:
         return []
@@ -422,6 +459,93 @@ def parse_decimal(value, fallback=Decimal("0")):
         return Decimal(text)
     except (InvalidOperation, ValueError):
         return fallback
+
+
+def normalize_phone(phone):
+    digits = (phone or "").strip()
+    if not digits:
+        return ""
+
+    for ch in " ()-":
+        digits = digits.replace(ch, "")
+
+    if digits.startswith("+"):
+        rest = digits[1:]
+        if not rest.isdigit():
+            return None
+    elif not digits.isdigit():
+        return None
+
+    return digits
+
+
+class EditUserDialog(QDialog):
+    def __init__(self, parent=None, full_name="", email="", phone=""):
+        super().__init__(parent)
+        self.setWindowTitle("Изменение данных")
+        self.setModal(True)
+
+        layout = QFormLayout(self)
+
+        self.full_name_edit = QLineEdit(full_name or "")
+        self.full_name_edit.setObjectName("fullNameEdit")
+        layout.addRow("ФИО", self.full_name_edit)
+
+        self.email_edit = QLineEdit(email or "")
+        self.email_edit.setObjectName("emailEdit")
+        self.email_edit.setPlaceholderText("name@example.com")
+        layout.addRow("Email", self.email_edit)
+
+        self.phone_edit = QLineEdit(phone or "")
+        self.phone_edit.setObjectName("phoneEdit")
+        self.phone_edit.setPlaceholderText("+79991234567")
+        layout.addRow("Телефон", self.phone_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._result = None
+
+    def accept(self):
+        full_name = self.full_name_edit.text().strip()
+        if not full_name:
+            QMessageBox.warning(self, "Ошибка", "Укажите ФИО.")
+            self.full_name_edit.setFocus()
+            return
+
+        email = self.email_edit.text().strip()
+        if email and "@" not in email:
+            QMessageBox.warning(self, "Ошибка", "Введите корректный email.")
+            self.email_edit.setFocus()
+            self.email_edit.selectAll()
+            return
+
+        phone_text = self.phone_edit.text().strip()
+        if phone_text:
+            normalized = normalize_phone(phone_text)
+            if normalized is None:
+                QMessageBox.warning(
+                    self,
+                    "Ошибка",
+                    "Телефон может содержать только цифры и, при необходимости, знак '+'.",
+                )
+                self.phone_edit.setFocus()
+                self.phone_edit.selectAll()
+                return
+            phone_text = normalized
+
+        self._result = {
+            "full_name": full_name,
+            "email": email,
+            "phone": phone_text,
+        }
+
+        super().accept()
+
+    def get_data(self):
+        return self._result
 
 
 def choose_slot_for_booking(slots, salon_name="", service_name=""):
@@ -692,16 +816,20 @@ def load_data_for_role(role, user):
     if role == "client":
         load_catalog(update_filters=True)
         load_bookings(user["id"] if user else None)
+        load_user_info(user["id"] if user else None)
     elif role == "salon":
         load_catalog(update_filters=True)
         load_salon_services()
+        load_user_info(None)
     elif role == "admin":
         load_catalog(update_filters=True)
         load_salon_services()
         load_users()
+        load_user_info(None)
     else:
         load_catalog(update_filters=True)
         load_bookings(None)
+        load_user_info(None)
 
 
 def configure_role_controls(role):
@@ -724,6 +852,9 @@ def configure_role_controls(role):
         main.btnDeleteService.setEnabled(manage_services)
     if hasattr(main, "btnSaveService"):
         main.btnSaveService.setEnabled(manage_services)
+    if hasattr(main, "btnResetInfo"):
+        can_edit_profile = client_only and current_user is not None and current_user.get("id")
+        main.btnResetInfo.setEnabled(bool(can_edit_profile))
 
     if hasattr(main, "btnDeleteUser"):
         main.btnDeleteUser.setEnabled(is_admin)
@@ -743,6 +874,7 @@ def setup_role(role, user=None):
         "book": getattr(main, "tabBookings", None),
         "salon": getattr(main, "tabSalon", None),
         "admin": getattr(main, "tabAdmin", None),
+        "user": getattr(main, "tabUser", None),
     }
 
     for widget in tabs.values():
@@ -953,6 +1085,84 @@ def on_add_booking():
         return
 
     on_book_now()
+
+
+def on_edit_user_info():
+    if current_user is None or current_role != "client" or not current_user.get("id"):
+        QMessageBox.information(
+            main,
+            "Изменение данных",
+            "Редактировать профиль может только авторизованный клиент.",
+        )
+        return
+
+    user_id = current_user.get("id")
+    query = execute_select(
+        "SELECT full_name, email, phone FROM users WHERE id = ?",
+        [user_id],
+        "Загрузка данных клиента",
+    )
+
+    if query is None or not query.next():
+        QMessageBox.warning(
+            main,
+            "Изменение данных",
+            "Не удалось получить текущие данные пользователя.",
+        )
+        return
+
+    dialog = EditUserDialog(
+        main,
+        full_name=query.value("full_name"),
+        email=query.value("email"),
+        phone=query.value("phone"),
+    )
+
+    if dialog.exec() != QDialog.Accepted:
+        return
+
+    data = dialog.get_data() or {}
+    full_name = data.get("full_name", "").strip()
+    email = data.get("email", "").strip()
+    phone = data.get("phone", "").strip()
+
+    if not full_name:
+        QMessageBox.warning(main, "Изменение данных", "ФИО не может быть пустым.")
+        return
+
+    params = [full_name, email or None, phone or None, user_id]
+    if not execute_action(
+        "UPDATE users SET full_name = ?, email = ?, phone = ? WHERE id = ?",
+        params,
+        "Обновление данных клиента",
+    ):
+        return
+
+    current_user["full_name"] = full_name
+    if email or "email" in current_user:
+        current_user["email"] = email
+    if phone or "phone" in current_user:
+        current_user["phone"] = phone
+
+    load_user_info(user_id)
+    configure_role_controls(current_role)
+
+    if current_role in ROLE_CONFIGS:
+        base_title = ROLE_CONFIGS[current_role]["title"]
+    else:
+        role_label = None
+        if current_user and current_user.get("role_name"):
+            role_label = current_user.get("role_name")
+        if not role_label:
+            role_label = current_role or "Пользователь"
+        base_title = f"Smart-SPA — {role_label}"
+
+    window_title = base_title
+    if current_user and current_user.get("full_name"):
+        window_title = f"{base_title} ({current_user['full_name']})"
+    main.setWindowTitle(window_title)
+
+    QMessageBox.information(main, "Изменение данных", "Ваши данные успешно сохранены.")
 
 
 def on_add_service():
@@ -1207,6 +1417,9 @@ if hasattr(main, "btnCancelBooking"):
 
 if hasattr(main, "btnAddBooking"):
     main.btnAddBooking.clicked.connect(on_add_booking)
+
+if hasattr(main, "btnResetInfo"):
+    main.btnResetInfo.clicked.connect(on_edit_user_info)
 
 if hasattr(main, "btnAddService"):
     main.btnAddService.clicked.connect(on_add_service)
