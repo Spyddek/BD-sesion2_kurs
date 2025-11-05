@@ -80,16 +80,24 @@ STATUS_ALIASES = {
 ALLOWED_CANCELLATION_STATUSES = {"ожидает подтверждения", "подтверждена"}
 
 def load_ui(path):
-    if not os.path.exists(path):
-        print("Файл не найден:", path)
-    f = QFile(path)
-    if not f.open(QFile.ReadOnly):
-        print("Ошибка открытия:", path)
-    ui = QUiLoader().load(f)
-    f.close()
-    return ui
-
-
+    base = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        path,
+        os.path.join(base, path),
+        os.path.join(base, "ui", os.path.basename(path)),
+        os.path.join(os.getcwd(), "ui", os.path.basename(path)),
+        os.path.join(base, os.path.basename(path)),
+    ]
+    for p in candidates:
+        f = QFile(p)
+        if f.exists() and f.open(QFile.ReadOnly):
+            try:
+                ui = QUiLoader().load(f)
+                return ui
+            finally:
+                f.close()
+    QMessageBox.critical(None, "UI", f"Файл не найден: {path}")
+    return None
 def format_cell(value):
     if value is None:
         return ""
@@ -385,6 +393,42 @@ def find_user(login_text):
     if not login_text:
         return None
 
+    phone = normalize_phone(login_text)
+    email = login_text if "@" in login_text else None
+
+    where_clauses = []
+    params = []
+
+    if phone:
+        where_clauses.append("u.phone = ?")
+        params.append(phone)
+    if email:
+        where_clauses.append("lower(u.email) = lower(?)")
+        params.append(email)
+
+    if not where_clauses:
+        return None
+
+    sql = (
+        "SELECT u.id, u.full_name, u.password_hash, r.code AS role_code, r.name AS role_name "
+        "FROM users u "
+        "JOIN roles r ON r.id = u.role_id "
+        "WHERE " + " OR ".join(where_clauses) + " "
+        "LIMIT 1"
+    )
+    query = execute_select(sql, params, "Поиск пользователя")
+    if query is None:
+        return None
+    if query.next():
+        return {
+            "id": query.value("id"),
+            "full_name": query.value("full_name"),
+            "password_hash": query.value("password_hash"),
+            "role_code": query.value("role_code"),
+            "role_name": query.value("role_name"),
+        }
+    return None
+
     sql = (
         "SELECT u.id, u.full_name, u.password_hash, r.code AS role_code, r.name AS role_name "
         "FROM users u "
@@ -636,17 +680,23 @@ def fetch_available_slots(salon_id, limit=20):
 
 
 def fetch_salons():
-    sql = "SELECT id, name, city FROM salons ORDER BY name"
-    query = execute_select(sql, context="Загрузка списка салонов")
+    if current_role == "salon" and current_user:
+        sql = (
+            "SELECT s.id, s.name, s.city "
+            "FROM salons s "
+            "JOIN salon_users su ON su.salon_id = s.id "
+            "WHERE su.user_id = ? "
+            "ORDER BY s.name"
+        )
+        query = execute_select(sql, [current_user.get("id")], context="Загрузка списка салонов")
+    else:
+        sql = "SELECT id, name, city FROM salons ORDER BY name"
+        query = execute_select(sql, context="Загрузка списка салонов")
     salons = []
     if query is not None:
         while query.next():
             salons.append(
-                {
-                    "id": query.value("id"),
-                    "name": query.value("name"),
-                    "city": query.value("city"),
-                }
+                {"id": query.value("id"), "name": query.value("name"), "city": query.value("city")}
             )
     return salons
 
@@ -682,6 +732,29 @@ def fetch_available_services_for_salon(salon_id):
 def fetch_masters_for_salon(salon_id):
     if salon_id is None:
         return []
+def fetch_masters_for_salon_and_service(salon_id, service_id):
+    if salon_id is None or service_id is None:
+        return []
+    sql = (
+        "SELECT m.id, m.full_name, m.specialization "
+        "FROM masters m "
+        "JOIN master_services ms ON ms.master_id = m.id "
+        "WHERE m.salon_id = ? AND m.active = TRUE AND ms.service_id = ? "
+        "ORDER BY m.full_name"
+    )
+    query = execute_select(sql, [salon_id, service_id], "Загрузка мастеров для услуги салона")
+    masters = []
+    if query is not None:
+        while query.next():
+            masters.append(
+                {
+                    "id": query.value("id"),
+                    "full_name": query.value("full_name"),
+                    "specialization": query.value("specialization"),
+                }
+            )
+    return masters
+
 
     sql = (
         "SELECT id, full_name, specialization "
@@ -956,6 +1029,100 @@ class CreateSlotDialog(QDialog):
         start_dt = self.start_edit.dateTime()
         end_dt = start_dt.addSecs(int(self.duration_min) * 60)
         self.end_label.setText(end_dt.toString("dd.MM.yyyy HH:mm"))
+class AssignMastersDialog(QDialog):
+    def __init__(self, parent=None, salon=None, service=None):
+        super().__init__(parent)
+        self.setWindowTitle("Назначение мастеров на услугу")
+        self._salon = salon or {}
+        self._service = service or {}
+        self._result = None
+
+        layout = QFormLayout(self)
+
+        label = QLabel(f"Салон: {self._salon.get('name') or self._salon.get('id')}\n"
+                       f"Услуга: {self._service.get('name') or self._service.get('id')}")
+        layout.addRow(label)
+
+        self._masters = fetch_masters_for_salon(self._salon.get('id'))
+        assigned_ids = set(fetch_assigned_master_ids(self._salon.get('id'), self._service.get('id')))
+
+        self._checkboxes = []
+        for m in self._masters:
+            cb = QCheckBox((m.get("full_name") or "Мастер") + (f" ({m.get('specialization')})" if m.get("specialization") else ""))
+            cb.setChecked(m.get("id") in assigned_ids)
+            cb.master_id = m.get("id")
+            self._checkboxes.append(cb)
+            layout.addRow(cb)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel, self)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+    def get_data(self):
+        return self._result
+
+    def accept(self):
+        selected = [cb.master_id for cb in self._checkboxes if cb.isChecked()]
+        self._result = {"selected_master_ids": selected}
+        super().accept()
+
+
+def fetch_assigned_master_ids(salon_id, service_id):
+    sql = (
+        "SELECT ms.master_id "
+        "FROM master_services ms "
+        "JOIN masters m ON m.id = ms.master_id "
+        "WHERE m.salon_id = ? AND ms.service_id = ? "
+        "ORDER BY ms.master_id"
+    )
+    q = execute_select(sql, [salon_id, service_id], "Назначенные мастера на услугу")
+    result = []
+    if q is not None:
+        while q.next():
+            result.append(q.value(0))
+    return result
+
+
+def save_master_assignments(salon_id, service_id, master_ids):
+    # Simple approach: replace assignments
+    if not execute_action("DELETE FROM master_services WHERE master_id IN (SELECT id FROM masters WHERE salon_id = ?) AND service_id = ?",
+                          [salon_id, service_id],
+                          "Очистка старых назначений мастеров"):
+        return False
+    for mid in master_ids:
+        if not execute_action("INSERT INTO master_services(master_id, service_id) VALUES (?, ?)",
+                              [mid, service_id],
+                              "Назначение мастера на услугу"):
+            return False
+    return True
+
+
+def on_assign_masters_button():
+    table = getattr(main, "tblServices", None)
+    selection = get_selected_row_payload(table)
+    if not selection:
+        QMessageBox.information(main, "Назначение мастеров", "Выберите услугу салона в таблице.")
+        return
+    _, payload = selection
+    salon = {"id": payload.get("salon_id"), "name": payload.get("salon_name")}
+    service = {"id": payload.get("service_id"), "name": payload.get("service_name")}
+    on_assign_masters_to_service(salon, service)
+
+
+def on_assign_masters_to_service(salon, service):
+    if not salon or not service or not salon.get("id") or not service.get("id"):
+        QMessageBox.warning(main, "Назначение мастеров", "Не удалось определить салон или услугу.")
+        return
+    dlg = AssignMastersDialog(main, salon=salon, service=service)
+    if dlg.exec() != QDialog.Accepted:
+        return
+    data = dlg.get_data() or {}
+    master_ids = data.get("selected_master_ids") or []
+    if not save_master_assignments(salon.get("id"), service.get("id"), master_ids):
+        return
+    QMessageBox.information(main, "Назначение мастеров", "Назначения сохранены.")
+
 
     def accept(self):
         master_data = self.master_combo.currentData()
@@ -1059,13 +1226,21 @@ def create_slot_for_service(context):
         if duration_query is not None and duration_query.next():
             context["duration_min"] = duration_query.value(0)
 
-    masters = fetch_masters_for_salon(salon_id)
+    masters = fetch_masters_for_salon_and_service(salon_id, service_id)
     if not masters:
         QMessageBox.information(
             main,
             "Добавление времени",
-            "В салоне нет активных мастеров. Добавьте мастеров прежде, чем создавать время.",
+            "Ни один мастер не назначен на эту услугу. Сначала назначьте мастера на услугу.",
         )
+        on_assign_masters_to_service({"id": salon_id, "name": context.get("salon_name")}, {"id": service_id, "name": context.get("service_name")})
+        masters = fetch_masters_for_salon_and_service(salon_id, service_id)
+        if not masters:
+            QMessageBox.information(
+                main,
+                "Добавление времени",
+                "В салоне нет активных мастеров. Добавьте мастеров прежде, чем создавать время.",
+            )
         return False
 
     dialog = CreateSlotDialog(main, context=context, masters=masters)
@@ -1506,37 +1681,31 @@ def on_login():
     global current_user
 
     username = login.leUsername.text().strip()
-    role_text = login.cbRole.currentText()
 
     if not username:
         QMessageBox.warning(login, "Ошибка", "Введите логин!")
         return
 
     user_record = find_user(username)
-    password = login.lePassword.text()
-    user = None
     if user_record is None:
-        QMessageBox.information(
-            login,
-            "Информация",
-            "Пользователь не найден в базе данных. Будут показаны общие данные.",
-        )
-        resolved_role = role_text
-    else:
-        if not password:
-            QMessageBox.warning(login, "Ошибка", "Введите пароль!")
-            login.lePassword.setFocus()
-            return
+        QMessageBox.warning(login, "Ошибка", "Пользователь не найден.")
+        return
 
-        stored_hash = user_record.get("password_hash")
-        if not verify_password(password, stored_hash):
-            QMessageBox.warning(login, "Ошибка", "Неверный пароль.")
-            login.lePassword.selectAll()
-            login.lePassword.setFocus()
-            return
+    password = login.lePassword.text()
+    if not password:
+        QMessageBox.warning(login, "Ошибка", "Введите пароль!")
+        login.lePassword.setFocus()
+        return
 
-        user = {key: value for key, value in user_record.items() if key != "password_hash"}
-        resolved_role = user.get("role_code") or role_text
+    stored_hash = user_record.get("password_hash")
+    if not verify_password(password, stored_hash):
+        QMessageBox.warning(login, "Ошибка", "Неверный пароль.")
+        login.lePassword.selectAll()
+        login.lePassword.setFocus()
+        return
+
+    user = {key: value for key, value in user_record.items() if key != "password_hash"}
+    resolved_role = user.get("role_code") or "client"
 
     current_user = user
     login.close()
@@ -2133,6 +2302,9 @@ if hasattr(main, "btnAddService"):
 
 if hasattr(main, "btnAddSlot"):
     main.btnAddSlot.clicked.connect(on_add_slot)
+
+if hasattr(main, "btnAssignMasters"):
+    main.btnAssignMasters.clicked.connect(on_assign_masters_button)
 
 if hasattr(main, "btnDeleteService"):
     main.btnDeleteService.clicked.connect(on_delete_service)
