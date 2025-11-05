@@ -388,6 +388,16 @@ def normalize_status(value):
     return STATUS_ALIASES.get(key, text)
 
 
+def _read_user_from_query(query):
+    return {
+        "id": query.value("id"),
+        "full_name": query.value("full_name"),
+        "password_hash": query.value("password_hash"),
+        "role_code": query.value("role_code"),
+        "role_name": query.value("role_name"),
+    }
+
+
 def find_user(login_text):
     login_text = (login_text or "").strip()
     if not login_text:
@@ -395,6 +405,12 @@ def find_user(login_text):
 
     phone = normalize_phone(login_text)
     email = login_text if "@" in login_text else None
+
+    base_sql = (
+        "SELECT u.id, u.full_name, u.password_hash, r.code AS role_code, r.name AS role_name "
+        "FROM users u "
+        "JOIN roles r ON r.id = u.role_id "
+    )
 
     where_clauses = []
     params = []
@@ -406,47 +422,25 @@ def find_user(login_text):
         where_clauses.append("lower(u.email) = lower(?)")
         params.append(email)
 
-    if not where_clauses:
-        return None
+    if where_clauses:
+        sql = base_sql + "WHERE " + " OR ".join(where_clauses) + " LIMIT 1"
+        query = execute_select(sql, params, "Поиск пользователя по контактам")
+        if query is None:
+            return None
+        if query.next():
+            return _read_user_from_query(query)
 
-    sql = (
-        "SELECT u.id, u.full_name, u.password_hash, r.code AS role_code, r.name AS role_name "
-        "FROM users u "
-        "JOIN roles r ON r.id = u.role_id "
-        "WHERE " + " OR ".join(where_clauses) + " "
-        "LIMIT 1"
+    fallback_sql = (
+        base_sql
+        + "WHERE u.phone = ? OR lower(u.email) = lower(?) OR lower(u.full_name) = lower(?) "
+        + "LIMIT 1"
     )
-    query = execute_select(sql, params, "Поиск пользователя")
+    fallback_params = [login_text, login_text, login_text]
+    query = execute_select(fallback_sql, fallback_params, "Поиск пользователя по всем полям")
     if query is None:
         return None
     if query.next():
-        return {
-            "id": query.value("id"),
-            "full_name": query.value("full_name"),
-            "password_hash": query.value("password_hash"),
-            "role_code": query.value("role_code"),
-            "role_name": query.value("role_name"),
-        }
-    return None
-
-    sql = (
-        "SELECT u.id, u.full_name, u.password_hash, r.code AS role_code, r.name AS role_name "
-        "FROM users u "
-        "JOIN roles r ON r.id = u.role_id "
-        "WHERE u.phone = ? OR u.email = ? OR lower(u.full_name) = lower(?) "
-        "LIMIT 1"
-    )
-    query = execute_select(sql, [login_text, login_text, login_text], "Поиск пользователя")
-    if query is None:
-        return None
-    if query.next():
-        return {
-            "id": query.value("id"),
-            "full_name": query.value("full_name"),
-            "password_hash": query.value("password_hash"),
-            "role_code": query.value("role_code"),
-            "role_name": query.value("role_name"),
-        }
+        return _read_user_from_query(query)
     return None
 
 

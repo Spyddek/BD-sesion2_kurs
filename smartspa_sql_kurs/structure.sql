@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict cShfOb0NAg1EgRGwWSXSZThmKthhVS5zYNx6RVh4H3Y9zFo0K9kP4sdpFTkhrOD
+\restrict 0eze3E2rKMwTI6mBccHPVCrZu8wrCgvHxTwRERPt5qmRilEYTyqexvESLZnFgp8
 
 -- Dumped from database version 18.0
 -- Dumped by pg_dump version 18.0
@@ -50,23 +50,62 @@ CREATE FUNCTION smart_spa.book_appointment(p_client bigint, p_salon bigint, p_ma
     LANGUAGE plpgsql
     AS $$
 DECLARE v_id BIGINT;
+DECLARE v_start TIMESTAMPTZ; DECLARE v_end TIMESTAMPTZ;
 BEGIN
-  PERFORM 1 FROM schedule_slots WHERE id = p_slot AND master_id = p_master FOR UPDATE;
+  -- Master belongs to the salon and is active
+  IF NOT EXISTS (
+    SELECT 1 FROM smart_spa.masters m WHERE m.id = p_master AND m.salon_id = p_salon AND m.active
+  ) THEN
+    RAISE EXCEPTION 'Ошибка: мастер не найден в салоне.';
+  END IF;
+
+  -- Salon actually offers this service
+  IF NOT EXISTS (
+    SELECT 1 FROM smart_spa.salon_services ss WHERE ss.salon_id = p_salon AND ss.service_id = p_service
+  ) THEN
+    RAISE EXCEPTION 'Ошибка: услуга недоступна в салоне.';
+  END IF;
+
+  -- Master performs this service
+  IF NOT EXISTS (
+    SELECT 1 FROM smart_spa.master_services ms WHERE ms.master_id = p_master AND ms.service_id = p_service
+  ) THEN
+    RAISE EXCEPTION 'Ошибка: мастер не выполняет выбранную услугу.';
+  END IF;
+
+  -- Slot belongs to the master and is in the future
+  SELECT start_ts, end_ts INTO v_start, v_end
+  FROM smart_spa.schedule_slots s
+  WHERE s.id = p_slot AND s.master_id = p_master
+  FOR UPDATE;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'Ошибка: слот не найден или не принадлежит мастеру.';
   END IF;
+  IF v_start < now() THEN
+    RAISE EXCEPTION 'Ошибка: нельзя бронировать прошедший слот.';
+  END IF;
 
-  IF EXISTS (SELECT 1 FROM schedule_slots WHERE id = p_slot AND is_booked) THEN
+  -- Slot is still free
+  IF EXISTS (SELECT 1 FROM smart_spa.schedule_slots WHERE id = p_slot AND is_booked) THEN
     RAISE EXCEPTION 'Ошибка: слот уже занят.';
   END IF;
 
-  UPDATE schedule_slots SET is_booked = TRUE WHERE id = p_slot;
+  -- Client has no overlapping appointments
+  IF EXISTS (
+    SELECT 1
+    FROM smart_spa.appointments a
+    JOIN smart_spa.schedule_slots s2 ON s2.id = a.slot_id
+    WHERE a.client_id = p_client
+      AND a.status IN ('ожидает подтверждения','подтверждена')
+      AND tstzrange(s2.start_ts, s2.end_ts, '[)') && tstzrange(v_start, v_end, '[)')
+  ) THEN
+    RAISE EXCEPTION 'Ошибка: у клиента уже есть запись в это время.';
+  END IF;
 
-  INSERT INTO appointments(client_id, salon_id, master_id, service_id, slot_id, status)
-  VALUES (p_client, p_salon, p_master, p_service, p_slot, 'подтверждена')
+  INSERT INTO smart_spa.appointments (client_id, salon_id, master_id, service_id, slot_id, status)
+  VALUES (p_client, p_salon, p_master, p_service, p_slot, 'ожидает подтверждения')
   RETURNING id INTO v_id;
 
-  RAISE NOTICE 'Запись создана №%', v_id;
   RETURN v_id;
 END;
 $$;
@@ -81,17 +120,24 @@ ALTER FUNCTION smart_spa.book_appointment(p_client bigint, p_salon bigint, p_mas
 CREATE FUNCTION smart_spa.cancel_appointment(p_id bigint) RETURNS void
     LANGUAGE plpgsql
     AS $$
-DECLARE v_slot BIGINT;
+DECLARE v_slot BIGINT; DECLARE v_start TIMESTAMPTZ;
 BEGIN
-  UPDATE appointments
-     SET status = 'отменена'
-   WHERE id = p_id AND status IN ('ожидает подтверждения','подтверждена')
-  RETURNING slot_id INTO v_slot;
+  SELECT slot_id, s.start_ts INTO v_slot, v_start
+  FROM smart_spa.appointments a
+  JOIN smart_spa.schedule_slots s ON s.id = a.slot_id
+  WHERE a.id = p_id AND a.status IN ('ожидает подтверждения','подтверждена')
+  FOR UPDATE;
 
-  IF FOUND THEN
-    UPDATE schedule_slots SET is_booked = FALSE WHERE id = v_slot;
-    RAISE NOTICE 'Запись отменена и слот освобождён.';
+  IF NOT FOUND THEN
+    RAISE NOTICE 'Запись не найдена или уже отменена/завершена.';
+    RETURN;
   END IF;
+
+  IF v_start <= now() THEN
+    RAISE EXCEPTION 'Нельзя отменить запись, время которой уже прошло или наступило.';
+  END IF;
+
+  UPDATE smart_spa.appointments SET status = 'отменена' WHERE id = p_id;
 END;
 $$;
 
@@ -145,6 +191,28 @@ $$;
 
 ALTER FUNCTION smart_spa.check_slot_overlap() OWNER TO postgres;
 
+--
+-- Name: sync_slot_booked(); Type: FUNCTION; Schema: smart_spa; Owner: postgres
+--
+
+CREATE FUNCTION smart_spa.sync_slot_booked() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    UPDATE smart_spa.schedule_slots SET is_booked = TRUE WHERE id = NEW.slot_id;
+  ELSIF TG_OP = 'DELETE' THEN
+    UPDATE smart_spa.schedule_slots SET is_booked = FALSE WHERE id = OLD.slot_id;
+  ELSIF TG_OP = 'UPDATE' AND NEW.slot_id <> OLD.slot_id THEN
+    UPDATE smart_spa.schedule_slots SET is_booked = FALSE WHERE id = OLD.slot_id;
+    UPDATE smart_spa.schedule_slots SET is_booked = TRUE  WHERE id = NEW.slot_id;
+  END IF;
+  RETURN NULL;
+END; $$;
+
+
+ALTER FUNCTION smart_spa.sync_slot_booked() OWNER TO postgres;
+
 SET default_tablespace = '';
 
 SET default_table_access_method = heap;
@@ -188,6 +256,18 @@ ALTER SEQUENCE smart_spa.appointments_id_seq OWNER TO postgres;
 
 ALTER SEQUENCE smart_spa.appointments_id_seq OWNED BY smart_spa.appointments.id;
 
+
+--
+-- Name: master_services; Type: TABLE; Schema: smart_spa; Owner: postgres
+--
+
+CREATE TABLE smart_spa.master_services (
+    master_id bigint NOT NULL,
+    service_id bigint NOT NULL
+);
+
+
+ALTER TABLE smart_spa.master_services OWNER TO postgres;
 
 --
 -- Name: masters; Type: TABLE; Schema: smart_spa; Owner: postgres
@@ -312,6 +392,18 @@ CREATE TABLE smart_spa.salon_services (
 
 
 ALTER TABLE smart_spa.salon_services OWNER TO postgres;
+
+--
+-- Name: salon_users; Type: TABLE; Schema: smart_spa; Owner: postgres
+--
+
+CREATE TABLE smart_spa.salon_users (
+    user_id bigint NOT NULL,
+    salon_id bigint NOT NULL
+);
+
+
+ALTER TABLE smart_spa.salon_users OWNER TO postgres;
 
 --
 -- Name: salons; Type: TABLE; Schema: smart_spa; Owner: postgres
@@ -536,6 +628,14 @@ ALTER TABLE ONLY smart_spa.appointments
 
 
 --
+-- Name: master_services master_services_pkey; Type: CONSTRAINT; Schema: smart_spa; Owner: postgres
+--
+
+ALTER TABLE ONLY smart_spa.master_services
+    ADD CONSTRAINT master_services_pkey PRIMARY KEY (master_id, service_id);
+
+
+--
 -- Name: masters masters_pkey; Type: CONSTRAINT; Schema: smart_spa; Owner: postgres
 --
 
@@ -581,6 +681,14 @@ ALTER TABLE ONLY smart_spa.roles
 
 ALTER TABLE ONLY smart_spa.salon_services
     ADD CONSTRAINT salon_services_pkey PRIMARY KEY (salon_id, service_id);
+
+
+--
+-- Name: salon_users salon_users_pkey; Type: CONSTRAINT; Schema: smart_spa; Owner: postgres
+--
+
+ALTER TABLE ONLY smart_spa.salon_users
+    ADD CONSTRAINT salon_users_pkey PRIMARY KEY (user_id, salon_id);
 
 
 --
@@ -632,10 +740,38 @@ ALTER TABLE ONLY smart_spa.users
 
 
 --
+-- Name: idx_appointments_client; Type: INDEX; Schema: smart_spa; Owner: postgres
+--
+
+CREATE INDEX idx_appointments_client ON smart_spa.appointments USING btree (client_id);
+
+
+--
+-- Name: idx_master_services_service; Type: INDEX; Schema: smart_spa; Owner: postgres
+--
+
+CREATE INDEX idx_master_services_service ON smart_spa.master_services USING btree (service_id);
+
+
+--
+-- Name: idx_masters_salon_active; Type: INDEX; Schema: smart_spa; Owner: postgres
+--
+
+CREATE INDEX idx_masters_salon_active ON smart_spa.masters USING btree (salon_id, active);
+
+
+--
 -- Name: idx_reviews_salon_created; Type: INDEX; Schema: smart_spa; Owner: postgres
 --
 
 CREATE INDEX idx_reviews_salon_created ON smart_spa.reviews USING btree (salon_id, created_at DESC);
+
+
+--
+-- Name: idx_salon_users_user; Type: INDEX; Schema: smart_spa; Owner: postgres
+--
+
+CREATE INDEX idx_salon_users_user ON smart_spa.salon_users USING btree (user_id);
 
 
 --
@@ -657,6 +793,13 @@ CREATE TRIGGER trg_check_review_after_visit BEFORE INSERT OR UPDATE ON smart_spa
 --
 
 CREATE TRIGGER trg_check_slot_overlap BEFORE INSERT OR UPDATE ON smart_spa.schedule_slots FOR EACH ROW EXECUTE FUNCTION smart_spa.check_slot_overlap();
+
+
+--
+-- Name: appointments trg_sync_slot_booked; Type: TRIGGER; Schema: smart_spa; Owner: postgres
+--
+
+CREATE TRIGGER trg_sync_slot_booked AFTER INSERT OR DELETE OR UPDATE ON smart_spa.appointments FOR EACH ROW EXECUTE FUNCTION smart_spa.sync_slot_booked();
 
 
 --
@@ -697,6 +840,22 @@ ALTER TABLE ONLY smart_spa.appointments
 
 ALTER TABLE ONLY smart_spa.appointments
     ADD CONSTRAINT appointments_slot_id_fkey FOREIGN KEY (slot_id) REFERENCES smart_spa.schedule_slots(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: master_services master_services_master_id_fkey; Type: FK CONSTRAINT; Schema: smart_spa; Owner: postgres
+--
+
+ALTER TABLE ONLY smart_spa.master_services
+    ADD CONSTRAINT master_services_master_id_fkey FOREIGN KEY (master_id) REFERENCES smart_spa.masters(id) ON DELETE CASCADE;
+
+
+--
+-- Name: master_services master_services_service_id_fkey; Type: FK CONSTRAINT; Schema: smart_spa; Owner: postgres
+--
+
+ALTER TABLE ONLY smart_spa.master_services
+    ADD CONSTRAINT master_services_service_id_fkey FOREIGN KEY (service_id) REFERENCES smart_spa.services(id) ON DELETE CASCADE;
 
 
 --
@@ -748,6 +907,22 @@ ALTER TABLE ONLY smart_spa.salon_services
 
 
 --
+-- Name: salon_users salon_users_salon_id_fkey; Type: FK CONSTRAINT; Schema: smart_spa; Owner: postgres
+--
+
+ALTER TABLE ONLY smart_spa.salon_users
+    ADD CONSTRAINT salon_users_salon_id_fkey FOREIGN KEY (salon_id) REFERENCES smart_spa.salons(id) ON DELETE CASCADE;
+
+
+--
+-- Name: salon_users salon_users_user_id_fkey; Type: FK CONSTRAINT; Schema: smart_spa; Owner: postgres
+--
+
+ALTER TABLE ONLY smart_spa.salon_users
+    ADD CONSTRAINT salon_users_user_id_fkey FOREIGN KEY (user_id) REFERENCES smart_spa.users(id) ON DELETE CASCADE;
+
+
+--
 -- Name: schedule_slots schedule_slots_master_id_fkey; Type: FK CONSTRAINT; Schema: smart_spa; Owner: postgres
 --
 
@@ -767,5 +942,5 @@ ALTER TABLE ONLY smart_spa.users
 -- PostgreSQL database dump complete
 --
 
-\unrestrict cShfOb0NAg1EgRGwWSXSZThmKthhVS5zYNx6RVh4H3Y9zFo0K9kP4sdpFTkhrOD
+\unrestrict 0eze3E2rKMwTI6mBccHPVCrZu8wrCgvHxTwRERPt5qmRilEYTyqexvESLZnFgp8
 
