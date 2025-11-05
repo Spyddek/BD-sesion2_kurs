@@ -7,7 +7,7 @@ def connect_db():
     db.setHostName(os.getenv("PGHOST", "localhost"))
     db.setDatabaseName(os.getenv("PGDATABASE", "smart_spa"))
     db.setUserName(os.getenv("PGUSER", "postgres"))
-    db.setPassword(os.getenv("PGPASSWORD", ""))
+    db.setPassword(os.getenv("PGPASSWORD", "23565471"))
     db.setPort(int(os.getenv("PGPORT", "5432")))
 
     if not db.open():
