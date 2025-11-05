@@ -1,13 +1,14 @@
 from PySide6.QtSql import QSqlDatabase, QSqlQuery
 from PySide6.QtWidgets import QMessageBox
+import os
 
 def connect_db():
     db = QSqlDatabase.addDatabase("QPSQL")
-    db.setHostName("localhost")
-    db.setDatabaseName("smart_spa")
-    db.setUserName("postgres")
-    db.setPassword("23565471")
-    db.setPort(5432)
+    db.setHostName(os.getenv("PGHOST", "localhost"))
+    db.setDatabaseName(os.getenv("PGDATABASE", "smart_spa"))
+    db.setUserName(os.getenv("PGUSER", "postgres"))
+    db.setPassword(os.getenv("PGPASSWORD", "23565471"))
+    db.setPort(int(os.getenv("PGPORT", "5432")))
 
     if not db.open():
         QMessageBox.critical(None, "Ошибка БД", db.lastError().text())
