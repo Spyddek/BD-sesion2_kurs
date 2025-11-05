@@ -22,6 +22,9 @@ from PySide6.QtWidgets import (
     QComboBox,
     QLabel,
     QDateTimeEdit,
+    QCheckBox,
+    QWidget,
+    QVBoxLayout,
 )
 from PySide6.QtUiTools import QUiLoader
 from PySide6.QtCore import QFile, QDate, QTime, QDateTime, Qt
@@ -726,6 +729,27 @@ def fetch_available_services_for_salon(salon_id):
 def fetch_masters_for_salon(salon_id):
     if salon_id is None:
         return []
+
+    sql = (
+        "SELECT id, full_name, specialization "
+        "FROM masters "
+        "WHERE salon_id = ? AND active = TRUE "
+        "ORDER BY full_name"
+    )
+    query = execute_select(sql, [salon_id], "Загрузка мастеров салона")
+    masters = []
+    if query is not None:
+        while query.next():
+            masters.append(
+                {
+                    "id": query.value("id"),
+                    "full_name": query.value("full_name"),
+                    "specialization": query.value("specialization"),
+                }
+            )
+    return masters
+
+
 def fetch_masters_for_salon_and_service(salon_id, service_id):
     if salon_id is None or service_id is None:
         return []
@@ -750,24 +774,46 @@ def fetch_masters_for_salon_and_service(salon_id, service_id):
     return masters
 
 
-    sql = (
-        "SELECT id, full_name, specialization "
-        "FROM masters "
-        "WHERE salon_id = ? AND active = TRUE "
-        "ORDER BY full_name"
+def create_master_for_salon(salon_id, data):
+    if salon_id is None:
+        return None
+
+    data = data or {}
+    full_name = (data.get("full_name") or "").strip()
+    if not full_name:
+        return None
+
+    specialization = data.get("specialization") or None
+    is_active = bool(data.get("active", True))
+
+    query = QSqlQuery()
+    query.prepare(
+        "INSERT INTO masters (salon_id, full_name, specialization, active) "
+        "VALUES (?, ?, ?, ?) RETURNING id, full_name, specialization, active"
     )
-    query = execute_select(sql, [salon_id], "Загрузка мастеров салона")
-    masters = []
-    if query is not None:
-        while query.next():
-            masters.append(
-                {
-                    "id": query.value("id"),
-                    "full_name": query.value("full_name"),
-                    "specialization": query.value("specialization"),
-                }
-            )
-    return masters
+    query.addBindValue(salon_id)
+    query.addBindValue(full_name)
+    query.addBindValue(specialization)
+    query.addBindValue(is_active)
+
+    if not query.exec():
+        show_db_error(query, "Добавление мастера в салон")
+        return None
+
+    if not query.next():
+        QMessageBox.warning(
+            globals().get("main"),
+            "Новый мастер",
+            "Не удалось получить данные добавленного мастера.",
+        )
+        return None
+
+    return {
+        "id": query.value("id"),
+        "full_name": query.value("full_name"),
+        "specialization": query.value("specialization"),
+        "active": query.value("active"),
+    }
 
 
 def format_price(value):
@@ -944,6 +990,63 @@ class CreateServiceDialog(QDialog):
         return self._result
 
 
+class CreateMasterDialog(QDialog):
+    def __init__(self, parent=None, salon=None):
+        super().__init__(parent)
+        self.setWindowTitle("Новый мастер")
+        self.setModal(True)
+
+        salon = salon or {}
+
+        layout = QFormLayout(self)
+
+        salon_name = salon.get("name") or salon.get("salon_name")
+        if salon_name:
+            info_label = QLabel(salon_name)
+            info_label.setWordWrap(True)
+            layout.addRow("Салон", info_label)
+
+        self.name_edit = QLineEdit()
+        self.name_edit.setObjectName("masterNameEdit")
+        layout.addRow("ФИО", self.name_edit)
+
+        self.specialization_edit = QLineEdit()
+        self.specialization_edit.setObjectName("masterSpecEdit")
+        layout.addRow("Специализация", self.specialization_edit)
+
+        self.active_checkbox = QCheckBox("Мастер активен")
+        self.active_checkbox.setChecked(True)
+        layout.addRow("", self.active_checkbox)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+        self._result = None
+
+    def accept(self):
+        full_name = self.name_edit.text().strip()
+        if not full_name:
+            QMessageBox.warning(self, "Новый мастер", "Укажите полное имя мастера.")
+            self.name_edit.setFocus()
+            return
+
+        specialization = self.specialization_edit.text().strip() or None
+        is_active = bool(self.active_checkbox.isChecked())
+
+        self._result = {
+            "full_name": full_name,
+            "specialization": specialization,
+            "active": is_active,
+        }
+
+        super().accept()
+
+    def get_data(self):
+        return self._result
+
+
 class CreateSlotDialog(QDialog):
     def __init__(self, parent=None, context=None, masters=None):
         super().__init__(parent)
@@ -1023,6 +1126,39 @@ class CreateSlotDialog(QDialog):
         start_dt = self.start_edit.dateTime()
         end_dt = start_dt.addSecs(int(self.duration_min) * 60)
         self.end_label.setText(end_dt.toString("dd.MM.yyyy HH:mm"))
+
+    def accept(self):
+        master_data = self.master_combo.currentData()
+        if not master_data or not master_data.get("id"):
+            QMessageBox.warning(self, "Добавление времени", "Выберите мастера.")
+            return
+
+        start_dt = self.start_edit.dateTime()
+        if start_dt < QDateTime.currentDateTime():
+            QMessageBox.warning(
+                self,
+                "Добавление времени",
+                "Нельзя создать слот в прошлом. Выберите другое время.",
+            )
+            return
+
+        seconds = start_dt.time().second()
+        if seconds:
+            start_dt = start_dt.addSecs(-seconds)
+
+        end_dt = start_dt.addSecs(int(self.duration_min) * 60)
+
+        self._result = {
+            "master": master_data,
+            "master_id": master_data.get("id"),
+            "start_ts": start_dt,
+            "end_ts": end_dt,
+        }
+
+        super().accept()
+
+    def get_data(self):
+        return self._result
 class AssignMastersDialog(QDialog):
     def __init__(self, parent=None, salon=None, service=None):
         super().__init__(parent)
@@ -1033,22 +1169,24 @@ class AssignMastersDialog(QDialog):
 
         layout = QFormLayout(self)
 
-        label = QLabel(f"Салон: {self._salon.get('name') or self._salon.get('id')}\n"
-                       f"Услуга: {self._service.get('name') or self._service.get('id')}")
+        label = QLabel(
+            f"Салон: {self._salon.get('name') or self._salon.get('id')}\n"
+            f"Услуга: {self._service.get('name') or self._service.get('id')}"
+        )
         layout.addRow(label)
 
-        self._masters = fetch_masters_for_salon(self._salon.get('id'))
-        assigned_ids = set(fetch_assigned_master_ids(self._salon.get('id'), self._service.get('id')))
+        self._list_container = QWidget(self)
+        self._list_layout = QVBoxLayout(self._list_container)
+        self._list_layout.setContentsMargins(0, 0, 0, 0)
+        self._list_layout.setSpacing(6)
+        layout.addRow(self._list_container)
 
         self._checkboxes = []
-        for m in self._masters:
-            cb = QCheckBox((m.get("full_name") or "Мастер") + (f" ({m.get('specialization')})" if m.get("specialization") else ""))
-            cb.setChecked(m.get("id") in assigned_ids)
-            cb.master_id = m.get("id")
-            self._checkboxes.append(cb)
-            layout.addRow(cb)
+        self._populate_master_checkboxes()
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel, self)
+        self._add_master_button = buttons.addButton("Добавить мастера", QDialogButtonBox.ActionRole)
+        self._add_master_button.clicked.connect(self._on_add_master)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addRow(buttons)
@@ -1061,8 +1199,75 @@ class AssignMastersDialog(QDialog):
         self._result = {"selected_master_ids": selected}
         super().accept()
 
+    def _populate_master_checkboxes(self, preserved_ids=None):
+        while self._list_layout.count():
+            item = self._list_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        self._checkboxes = []
+
+        salon_id = self._salon.get("id")
+        service_id = self._service.get("id")
+
+        masters = fetch_masters_for_salon(salon_id)
+        if preserved_ids is None:
+            assigned_ids = set(fetch_assigned_master_ids(salon_id, service_id))
+        else:
+            assigned_ids = set(preserved_ids)
+
+        if masters:
+            for master in masters:
+                cb = QCheckBox(
+                    (master.get("full_name") or "Мастер")
+                    + (
+                        f" ({master.get('specialization')})"
+                        if master.get("specialization")
+                        else ""
+                    )
+                )
+                cb.setChecked(master.get("id") in assigned_ids)
+                cb.master_id = master.get("id")
+                self._checkboxes.append(cb)
+                self._list_layout.addWidget(cb)
+        else:
+            placeholder = QLabel("В салоне ещё нет мастеров.")
+            placeholder.setWordWrap(True)
+            self._list_layout.addWidget(placeholder)
+
+    def _on_add_master(self):
+        salon_id = self._salon.get("id")
+        if not salon_id:
+            QMessageBox.warning(self, "Новый мастер", "Не удалось определить салон.")
+            return
+
+        dialog = CreateMasterDialog(self, salon=self._salon)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        data = dialog.get_data() or {}
+        master = create_master_for_salon(salon_id, data)
+        if master is None:
+            return
+
+        preserved = [cb.master_id for cb in self._checkboxes if cb.isChecked()]
+        master_id = master.get("id")
+        if master_id:
+            preserved.append(master_id)
+
+        self._populate_master_checkboxes(preserved_ids=preserved)
+
+        QMessageBox.information(
+            self,
+            "Новый мастер",
+            f"Мастер «{master.get('full_name')}» добавлен в салон.",
+        )
+
 
 def fetch_assigned_master_ids(salon_id, service_id):
+    if salon_id is None or service_id is None:
+        return []
     sql = (
         "SELECT ms.master_id "
         "FROM master_services ms "
@@ -1116,40 +1321,6 @@ def on_assign_masters_to_service(salon, service):
     if not save_master_assignments(salon.get("id"), service.get("id"), master_ids):
         return
     QMessageBox.information(main, "Назначение мастеров", "Назначения сохранены.")
-
-
-    def accept(self):
-        master_data = self.master_combo.currentData()
-        if not master_data or not master_data.get("id"):
-            QMessageBox.warning(self, "Добавление времени", "Выберите мастера.")
-            return
-
-        start_dt = self.start_edit.dateTime()
-        if start_dt < QDateTime.currentDateTime():
-            QMessageBox.warning(
-                self,
-                "Добавление времени",
-                "Нельзя создать слот в прошлом. Выберите другое время.",
-            )
-            return
-
-        seconds = start_dt.time().second()
-        if seconds:
-            start_dt = start_dt.addSecs(-seconds)
-
-        end_dt = start_dt.addSecs(int(self.duration_min) * 60)
-
-        self._result = {
-            "master": master_data,
-            "master_id": master_data.get("id"),
-            "start_ts": start_dt,
-            "end_ts": end_dt,
-        }
-
-        super().accept()
-
-    def get_data(self):
-        return self._result
 
 
 def create_service_via_dialog(parent):
@@ -1235,7 +1406,7 @@ def create_slot_for_service(context):
                 "Добавление времени",
                 "В салоне нет активных мастеров. Добавьте мастеров прежде, чем создавать время.",
             )
-        return False
+            return False
 
     dialog = CreateSlotDialog(main, context=context, masters=masters)
     if dialog.exec() != QDialog.Accepted:
@@ -1597,6 +1768,8 @@ def configure_role_controls(role):
 
     if hasattr(main, "btnAddService"):
         main.btnAddService.setEnabled(manage_services)
+    if hasattr(main, "btnAddMaster"):
+        main.btnAddMaster.setEnabled(manage_services)
     if hasattr(main, "btnAddSlot"):
         main.btnAddSlot.setEnabled(manage_services)
     if hasattr(main, "btnDeleteService"):
@@ -1931,6 +2104,102 @@ def on_edit_user_info():
     main.setWindowTitle(window_title)
 
     QMessageBox.information(main, "Изменение данных", "Ваши данные успешно сохранены.")
+
+
+def on_add_master():
+    table = getattr(main, "tblServices", None)
+    selection = get_selected_row_payload(table)
+
+    salon = None
+    service = None
+    if selection:
+        _, payload = selection
+        if payload:
+            salon_id = payload.get("salon_id")
+            salon_name = payload.get("salon_name")
+            city = payload.get("city")
+            if salon_id:
+                salon = {"id": salon_id, "name": salon_name, "city": city}
+            service_id = payload.get("service_id")
+            service_name = payload.get("service_name")
+            if service_id:
+                service = {"id": service_id, "name": service_name}
+
+    if salon is None:
+        salons = [item for item in fetch_salons() if item.get("id")]
+        if not salons:
+            QMessageBox.information(
+                main,
+                "Новый мастер",
+                "Не удалось найти салон для добавления мастера.",
+            )
+            return
+
+        if len(salons) == 1:
+            salon = salons[0]
+        else:
+            options = []
+            pairs = []
+            for item in salons:
+                name = item.get("name") or f"ID {item.get('id')}"
+                city = item.get("city")
+                display = name
+                if city and city not in (name or ""):
+                    display = f"{name} ({city})"
+                options.append(display)
+                pairs.append((display, item))
+
+            selection_text, accepted = QInputDialog.getItem(
+                main,
+                "Выбор салона",
+                "Выберите салон, где будет работать мастер:",
+                options,
+                0,
+                False,
+            )
+            if not accepted or not selection_text:
+                return
+            salon = None
+            for display, item in pairs:
+                if display == selection_text:
+                    salon = item
+                    break
+            if salon is None:
+                return
+
+    dialog = CreateMasterDialog(main, salon=salon)
+    if dialog.exec() != QDialog.Accepted:
+        return
+
+    data = dialog.get_data() or {}
+    master = create_master_for_salon(salon.get("id"), data)
+    if master is None:
+        return
+
+    display_salon = salon.get("name") or f"ID {salon.get('id')}"
+    city = salon.get("city")
+    if city and city not in (display_salon or ""):
+        display_salon = f"{display_salon} ({city})"
+
+    QMessageBox.information(
+        main,
+        "Новый мастер",
+        f"Мастер «{master.get('full_name')}» добавлен в салон «{display_salon}».",
+    )
+
+    if service and service.get("id"):
+        assign = QMessageBox.question(
+            main,
+            "Назначение мастера",
+            (
+                f"Назначить мастера «{master.get('full_name')}» на услугу "
+                f"«{service.get('name')}» прямо сейчас?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if assign == QMessageBox.Yes:
+            on_assign_masters_to_service(salon, service)
 
 
 def on_add_service():
@@ -2293,6 +2562,9 @@ if hasattr(main, "btnResetInfo"):
 
 if hasattr(main, "btnAddService"):
     main.btnAddService.clicked.connect(on_add_service)
+
+if hasattr(main, "btnAddMaster"):
+    main.btnAddMaster.clicked.connect(on_add_master)
 
 if hasattr(main, "btnAddSlot"):
     main.btnAddSlot.clicked.connect(on_add_slot)
