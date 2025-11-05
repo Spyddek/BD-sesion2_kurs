@@ -1,5 +1,8 @@
 import sys
 import os
+import base64
+import hashlib
+import hmac
 from decimal import Decimal, InvalidOperation
 
 from PySide6.QtWidgets import (
@@ -146,7 +149,7 @@ def find_user(login_text):
         return None
 
     sql = (
-        "SELECT u.id, u.full_name, r.code AS role_code, r.name AS role_name "
+        "SELECT u.id, u.full_name, u.password_hash, r.code AS role_code, r.name AS role_name "
         "FROM users u "
         "JOIN roles r ON r.id = u.role_id "
         "WHERE u.phone = ? OR u.email = ? OR lower(u.full_name) = lower(?) "
@@ -159,10 +162,41 @@ def find_user(login_text):
         return {
             "id": query.value("id"),
             "full_name": query.value("full_name"),
+            "password_hash": query.value("password_hash"),
             "role_code": query.value("role_code"),
             "role_name": query.value("role_name"),
         }
     return None
+
+
+def verify_password(plain_password, stored_hash):
+    if not stored_hash:
+        return False
+
+    plain_password = plain_password or ""
+    stored_hash = str(stored_hash)
+
+    if stored_hash.startswith("pbkdf2_sha256$"):
+        try:
+            _algorithm, iterations, salt, hash_value = stored_hash.split("$", 3)
+            iterations = int(iterations)
+        except (ValueError, TypeError):
+            return False
+
+        try:
+            derived_key = hashlib.pbkdf2_hmac(
+                "sha256",
+                plain_password.encode("utf-8"),
+                salt.encode("utf-8"),
+                iterations,
+            )
+        except ValueError:
+            return False
+
+        calculated = base64.b64encode(derived_key).decode("ascii")
+        return hmac.compare_digest(calculated, hash_value)
+
+    return hmac.compare_digest(stored_hash, plain_password)
 
 
 def populate_city_filter(selected_city=None):
@@ -764,8 +798,10 @@ def on_login():
         QMessageBox.warning(login, "Ошибка", "Введите логин!")
         return
 
-    user = find_user(username)
-    if user is None:
+    user_record = find_user(username)
+    password = login.lePassword.text()
+    user = None
+    if user_record is None:
         QMessageBox.information(
             login,
             "Информация",
@@ -773,10 +809,24 @@ def on_login():
         )
         resolved_role = role_text
     else:
+        if not password:
+            QMessageBox.warning(login, "Ошибка", "Введите пароль!")
+            login.lePassword.setFocus()
+            return
+
+        stored_hash = user_record.get("password_hash")
+        if not verify_password(password, stored_hash):
+            QMessageBox.warning(login, "Ошибка", "Неверный пароль.")
+            login.lePassword.selectAll()
+            login.lePassword.setFocus()
+            return
+
+        user = {key: value for key, value in user_record.items() if key != "password_hash"}
         resolved_role = user.get("role_code") or role_text
 
     current_user = user
     login.close()
+    login.lePassword.clear()
     setup_role(resolved_role, user)
     main.show()
 
@@ -1147,7 +1197,9 @@ def on_approve_review():
     )
 
 
-main.btnApply.clicked.connect(on_apply_filter)
+apply_button = getattr(main, "btnApply", None)
+if apply_button is not None:
+    apply_button.clicked.connect(on_apply_filter)
 main.btnBookNow.clicked.connect(on_book_now)
 
 if hasattr(main, "btnCancelBooking"):
