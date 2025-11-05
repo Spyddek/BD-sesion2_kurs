@@ -17,7 +17,7 @@
    <item row="0" column="0">
     <widget class="QTabWidget" name="twMain">
      <property name="currentIndex">
-      <number>2</number>
+      <number>1</number>
      </property>
      <widget class="QWidget" name="tabCatalog">
       <attribute name="title">
@@ -166,6 +166,26 @@
            <pointsize>14</pointsize>
           </font>
          </property>
+         <column>
+          <property name="text">
+           <string>Салон</string>
+          </property>
+         </column>
+         <column>
+          <property name="text">
+           <string>Услуга</string>
+          </property>
+         </column>
+         <column>
+          <property name="text">
+           <string>Начало</string>
+          </property>
+         </column>
+         <column>
+          <property name="text">
+           <string>Статус</string>
+          </property>
+         </column>
         </widget>
        </item>
        <item row="1" column="0">
