@@ -16,6 +16,9 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QLineEdit,
     QDialogButtonBox,
+    QSpinBox,
+    QDoubleSpinBox,
+    QPlainTextEdit,
 )
 from PySide6.QtUiTools import QUiLoader
 from PySide6.QtCore import QFile, QDate, QTime, QDateTime, Qt
@@ -100,6 +103,36 @@ def format_cell(value):
     return str(value)
 
 
+class SortableTableWidgetItem(QTableWidgetItem):
+    def __lt__(self, other):
+        if isinstance(other, QTableWidgetItem):
+            left_key = self.data(Qt.UserRole + 1)
+            right_key = other.data(Qt.UserRole + 1)
+            if left_key is not None and right_key is not None:
+                try:
+                    return left_key < right_key
+                except TypeError:
+                    return str(left_key) < str(right_key)
+        return super().__lt__(other)
+
+
+def build_sort_key(value):
+    if value is None:
+        return None
+    if isinstance(value, QDateTime):
+        return value.toSecsSinceEpoch()
+    if isinstance(value, QDate):
+        start_dt = QDateTime(value, QTime(0, 0))
+        return start_dt.toSecsSinceEpoch()
+    if isinstance(value, QTime):
+        return value.msecsSinceStartOfDay()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return value
+    return str(value)
+
+
 def populate_table(table, headers, rows, row_payloads=None):
     if table is None:
         return
@@ -117,7 +150,10 @@ def populate_table(table, headers, rows, row_payloads=None):
 
     for row_idx, row in enumerate(rows):
         for col_idx, cell in enumerate(row):
-            item = QTableWidgetItem(format_cell(cell))
+            item = SortableTableWidgetItem(format_cell(cell))
+            sort_key = build_sort_key(cell)
+            if sort_key is not None:
+                item.setData(Qt.UserRole + 1, sort_key)
             item.setFlags(item.flags() & ~Qt.ItemIsEditable)
             table.setItem(row_idx, col_idx, item)
 
@@ -748,6 +784,109 @@ class EditUserDialog(QDialog):
 
     def get_data(self):
         return self._result
+
+
+class CreateServiceDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Новая услуга")
+        self.setModal(True)
+
+        layout = QFormLayout(self)
+
+        self.name_edit = QLineEdit()
+        self.name_edit.setObjectName("serviceNameEdit")
+        layout.addRow("Название", self.name_edit)
+
+        self.description_edit = QPlainTextEdit()
+        self.description_edit.setObjectName("serviceDescriptionEdit")
+        self.description_edit.setPlaceholderText("Опишите услугу (необязательно)")
+        self.description_edit.setMaximumHeight(90)
+        layout.addRow("Описание", self.description_edit)
+
+        self.duration_spin = QSpinBox()
+        self.duration_spin.setObjectName("serviceDurationSpin")
+        self.duration_spin.setRange(15, 480)
+        self.duration_spin.setSingleStep(5)
+        self.duration_spin.setValue(60)
+        layout.addRow("Длительность (мин)", self.duration_spin)
+
+        self.price_spin = QDoubleSpinBox()
+        self.price_spin.setObjectName("servicePriceSpin")
+        self.price_spin.setRange(0.0, 1_000_000.0)
+        self.price_spin.setDecimals(2)
+        self.price_spin.setSingleStep(100.0)
+        self.price_spin.setValue(1000.0)
+        layout.addRow("Базовая цена", self.price_spin)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._result = None
+
+    def accept(self):
+        name = self.name_edit.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Ошибка", "Укажите название услуги.")
+            self.name_edit.setFocus()
+            return
+
+        description = self.description_edit.toPlainText().strip()
+        duration = int(self.duration_spin.value())
+        base_price = Decimal(str(self.price_spin.value()))
+
+        self._result = {
+            "name": name,
+            "description": description or None,
+            "duration_min": duration,
+            "base_price": base_price,
+        }
+
+        super().accept()
+
+    def get_data(self):
+        return self._result
+
+
+def create_service_via_dialog(parent):
+    dialog = CreateServiceDialog(parent)
+    if dialog.exec() != QDialog.Accepted:
+        return None
+
+    data = dialog.get_data()
+    if not data:
+        return None
+
+    query = QSqlQuery()
+    query.prepare(
+        "INSERT INTO services (name, description, base_price, duration_min) "
+        "VALUES (?, ?, ?, ?) RETURNING id"
+    )
+    query.addBindValue(data.get("name"))
+    query.addBindValue(data.get("description"))
+    query.addBindValue(float(data.get("base_price", Decimal("0"))))
+    query.addBindValue(data.get("duration_min"))
+
+    if not query.exec():
+        show_db_error(query, "Создание новой услуги")
+        return None
+
+    service_id = None
+    if query.next():
+        service_id = query.value(0)
+
+    if not service_id:
+        QMessageBox.warning(parent, "Создание услуги", "Не удалось сохранить услугу.")
+        return None
+
+    return {
+        "id": service_id,
+        "name": data.get("name"),
+        "duration_min": data.get("duration_min"),
+        "base_price": data.get("base_price"),
+    }
 
 
 def choose_slot_for_booking(slots, salon_name="", service_name=""):
@@ -1418,40 +1557,52 @@ def on_add_service():
             return
 
     available = fetch_available_services_for_salon(salon.get("id"))
-    if not available:
+    service = None
+
+    if available:
+        service_options = []
+        for svc in available:
+            details = [svc.get("name") or "Услуга"]
+            duration = svc.get("duration_min")
+            if duration:
+                details.append(f"{duration} мин")
+            base_price = svc.get("base_price")
+            if base_price is not None:
+                details.append(format_price(base_price))
+            service_options.append(" — ".join(details))
+
+        create_option = "Создать новую услугу…"
+        service_options.append(create_option)
+
+        selection, accepted = QInputDialog.getItem(
+            main,
+            "Выбор услуги",
+            "Выберите услугу, которую нужно добавить:",
+            service_options,
+            0,
+            False,
+        )
+        if not accepted:
+            return
+
+        if selection == create_option:
+            service = create_service_via_dialog(main)
+            if not service:
+                return
+        else:
+            try:
+                service = available[service_options.index(selection)]
+            except ValueError:
+                return
+    else:
         QMessageBox.information(
             main,
             "Добавление услуги",
-            "Для выбранного салона уже подключены все услуги или база услуг пуста.",
+            "Для выбранного салона нет доступных услуг. Создайте новую услугу.",
         )
-        return
-
-    service_options = []
-    for service in available:
-        details = [service.get("name") or "Услуга"]
-        duration = service.get("duration_min")
-        if duration:
-            details.append(f"{duration} мин")
-        base_price = service.get("base_price")
-        if base_price is not None:
-            details.append(format_price(base_price))
-        service_options.append(" — ".join(details))
-
-    selection, accepted = QInputDialog.getItem(
-        main,
-        "Выбор услуги",
-        "Выберите услугу, которую нужно добавить:",
-        service_options,
-        0,
-        False,
-    )
-    if not accepted:
-        return
-
-    try:
-        service = available[service_options.index(selection)]
-    except ValueError:
-        return
+        service = create_service_via_dialog(main)
+        if not service:
+            return
 
     base_price = parse_decimal(service.get("base_price"), Decimal("0"))
     price_value, ok = QInputDialog.getDouble(
