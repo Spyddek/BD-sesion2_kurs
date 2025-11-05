@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -42,6 +43,35 @@ current_user = None
 current_role = None
 catalog_filter_state = {"city": None, "search": ""}
 catalog_filters_initialized = False
+
+STATUS_ALIASES = {
+    "ожидает подтверждения": "ожидает подтверждения",
+    "ожидание подтверждения": "ожидает подтверждения",
+    "ожидаетподтверждения": "ожидает подтверждения",
+    "pending": "ожидает подтверждения",
+    "pending confirmation": "ожидает подтверждения",
+    "pending_confirmation": "ожидает подтверждения",
+    "awaiting confirmation": "ожидает подтверждения",
+    "awaiting_confirmation": "ожидает подтверждения",
+    "подтверждена": "подтверждена",
+    "подтвержден": "подтверждена",
+    "подтверждено": "подтверждена",
+    "confirmed": "подтверждена",
+    "confirmed appointment": "подтверждена",
+    "отменена": "отменена",
+    "отменен": "отменена",
+    "отменено": "отменена",
+    "canceled": "отменена",
+    "cancelled": "отменена",
+    "declined": "отменена",
+    "завершена": "завершена",
+    "завершено": "завершена",
+    "completed": "завершена",
+    "finished": "завершена",
+    "done": "завершена",
+}
+
+ALLOWED_CANCELLATION_STATUSES = {"ожидает подтверждения", "подтверждена"}
 
 def load_ui(path):
     if not os.path.exists(path):
@@ -145,6 +175,81 @@ def execute_action(sql, params=None, context=""):
             show_db_error(query, context)
             return False
     return True
+
+
+@lru_cache(maxsize=None)
+def get_table_columns(table_name):
+    query = execute_select(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = current_schema() AND table_name = ?",
+        [table_name],
+        context=f"Получение списка колонок таблицы {table_name}",
+    )
+    columns = set()
+    if query is not None:
+        while query.next():
+            column_name = query.value(0)
+            if column_name:
+                columns.add(str(column_name).lower())
+    return columns
+
+
+def build_status_select_clause(alias="status_display"):
+    appointment_columns = get_table_columns("appointments")
+    status_table_columns = get_table_columns("appointment_statuses")
+
+    join_clause = ""
+    if status_table_columns:
+        if "status_id" in appointment_columns and "id" in status_table_columns:
+            join_clause = " LEFT JOIN appointment_statuses st ON st.id = a.status_id "
+        elif "status_code" in appointment_columns and "code" in status_table_columns:
+            join_clause = " LEFT JOIN appointment_statuses st ON st.code = a.status_code "
+
+    parts = []
+    if join_clause:
+        for column in ("display_name", "name", "title", "label", "code"):
+            if column in status_table_columns:
+                parts.append(f"st.{column}")
+
+    for column, expression in (
+        ("status", "a.status"),
+        ("status_text", "a.status_text"),
+        ("status_code", "a.status_code"),
+    ):
+        if column in appointment_columns:
+            parts.append(expression)
+
+    if "status_id" in appointment_columns:
+        parts.append("CAST(a.status_id AS TEXT)")
+
+    if not parts:
+        parts.append("'неизвестно'")
+
+    seen = set()
+    unique_parts = []
+    for expr in parts:
+        if expr not in seen:
+            unique_parts.append(expr)
+            seen.add(expr)
+
+    if len(unique_parts) == 1:
+        select_expr = f"{unique_parts[0]} AS {alias}"
+    else:
+        select_expr = f"COALESCE({', '.join(unique_parts)}) AS {alias}"
+
+    return select_expr, join_clause
+
+
+def normalize_status(value):
+    if value is None:
+        return ""
+
+    text = str(value).strip()
+    if not text:
+        return ""
+
+    key = text.lower()
+    return STATUS_ALIASES.get(key, text)
 
 
 def find_user(login_text):
@@ -305,13 +410,15 @@ def load_bookings(user_id):
         populate_table(table, headers, [])
         return
 
+    status_select, status_join = build_status_select_clause()
     sql = (
         "SELECT a.id, salons.name AS salon_name, srv.name AS service_name, "
-        "       slots.start_ts AS start_ts, a.status AS status "
+        f"       slots.start_ts AS start_ts, {status_select} "
         "FROM appointments a "
         "JOIN salons ON salons.id = a.salon_id "
         "JOIN services srv ON srv.id = a.service_id "
         "JOIN schedule_slots slots ON slots.id = a.slot_id "
+        f"{status_join}"
         "WHERE a.client_id = ? "
         "ORDER BY slots.start_ts"
     )
@@ -321,11 +428,15 @@ def load_bookings(user_id):
     if query is not None:
         while query.next():
             appointment_id = query.value("id")
+            status_value = query.value("status_display")
+            status_text = normalize_status(status_value)
+            if not status_text:
+                status_text = format_cell(status_value)
             rows.append([
                 query.value("salon_name"),
                 query.value("service_name"),
                 query.value("start_ts"),
-                query.value("status"),
+                status_text,
             ])
             payloads.append({"appointment_id": appointment_id})
     populate_table(table, headers, rows, payloads)
@@ -1035,15 +1146,21 @@ def on_cancel_booking():
         QMessageBox.warning(main, "Отмена записи", "Некорректный идентификатор записи.")
         return
 
-    status_query = execute_select(
-        "SELECT status FROM appointments WHERE id = ?", [appointment_id], "Проверка статуса записи"
+    status_select, status_join = build_status_select_clause()
+    status_sql = (
+        f"SELECT {status_select} "
+        "FROM appointments a "
+        f"{status_join}"
+        "WHERE a.id = ?"
     )
+    status_query = execute_select(status_sql, [appointment_id], "Проверка статуса записи")
     if status_query is None or not status_query.next():
         QMessageBox.warning(main, "Отмена записи", "Запись не найдена в базе данных.")
         return
 
-    current_status = status_query.value("status")
-    if current_status not in {"ожидает подтверждения", "подтверждена"}:
+    current_status = status_query.value("status_display")
+    normalized_status = normalize_status(current_status)
+    if normalized_status not in ALLOWED_CANCELLATION_STATUSES:
         QMessageBox.information(
             main,
             "Отмена записи",
