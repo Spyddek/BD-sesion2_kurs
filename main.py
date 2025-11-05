@@ -19,6 +19,9 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QDoubleSpinBox,
     QPlainTextEdit,
+    QComboBox,
+    QLabel,
+    QDateTimeEdit,
 )
 from PySide6.QtUiTools import QUiLoader
 from PySide6.QtCore import QFile, QDate, QTime, QDateTime, Qt
@@ -676,6 +679,30 @@ def fetch_available_services_for_salon(salon_id):
     return services
 
 
+def fetch_masters_for_salon(salon_id):
+    if salon_id is None:
+        return []
+
+    sql = (
+        "SELECT id, full_name, specialization "
+        "FROM masters "
+        "WHERE salon_id = ? AND active = TRUE "
+        "ORDER BY full_name"
+    )
+    query = execute_select(sql, [salon_id], "Загрузка мастеров салона")
+    masters = []
+    if query is not None:
+        while query.next():
+            masters.append(
+                {
+                    "id": query.value("id"),
+                    "full_name": query.value("full_name"),
+                    "specialization": query.value("specialization"),
+                }
+            )
+    return masters
+
+
 def format_price(value):
     text = format_cell(value)
     if not text:
@@ -850,6 +877,120 @@ class CreateServiceDialog(QDialog):
         return self._result
 
 
+class CreateSlotDialog(QDialog):
+    def __init__(self, parent=None, context=None, masters=None):
+        super().__init__(parent)
+        self.setWindowTitle("Новое время")
+        self.setModal(True)
+
+        context = context or {}
+        masters = masters or []
+
+        layout = QFormLayout(self)
+
+        salon_name = context.get("salon_name") or context.get("salon")
+        if salon_name:
+            salon_label = QLabel(salon_name)
+            salon_label.setWordWrap(True)
+            layout.addRow("Салон", salon_label)
+
+        service_name = context.get("service_name") or context.get("name")
+        service_label = QLabel(service_name or "—")
+        service_label.setWordWrap(True)
+        layout.addRow("Услуга", service_label)
+
+        self.master_combo = QComboBox()
+        self.master_combo.setObjectName("slotMasterCombo")
+        for master in masters:
+            if not master:
+                continue
+            label = master.get("full_name") or "Мастер"
+            specialization = master.get("specialization")
+            if specialization:
+                label = f"{label} ({specialization})"
+            self.master_combo.addItem(label, master)
+        layout.addRow("Мастер", self.master_combo)
+
+        self.duration_min = int(context.get("duration_min") or 0)
+        if self.duration_min <= 0:
+            self.duration_min = 60
+
+        self.start_edit = QDateTimeEdit()
+        self.start_edit.setObjectName("slotStartEdit")
+        self.start_edit.setCalendarPopup(True)
+        self.start_edit.setDisplayFormat("dd.MM.yyyy HH:mm")
+        now = QDateTime.currentDateTime()
+        aligned = now.addSecs(0)
+        minute = aligned.time().minute()
+        if minute % 5:
+            delta = 5 - (minute % 5)
+            aligned = aligned.addSecs(delta * 60)
+        if aligned < now.addSecs(300):
+            aligned = aligned.addSecs(300)
+        self.start_edit.setDateTime(aligned)
+        self.start_edit.setMinimumDateTime(now)
+        layout.addRow("Начало", self.start_edit)
+
+        self.duration_label = QLabel(f"{self.duration_min} мин")
+        layout.addRow("Длительность", self.duration_label)
+
+        self.end_label = QLabel()
+        layout.addRow("Окончание", self.end_label)
+
+        self.start_edit.dateTimeChanged.connect(self._update_end_label)
+        self._update_end_label()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        if self.master_combo.count() == 0:
+            save_button = buttons.button(QDialogButtonBox.Save)
+            if save_button is not None:
+                save_button.setEnabled(False)
+
+        self._result = None
+
+    def _update_end_label(self):
+        start_dt = self.start_edit.dateTime()
+        end_dt = start_dt.addSecs(int(self.duration_min) * 60)
+        self.end_label.setText(end_dt.toString("dd.MM.yyyy HH:mm"))
+
+    def accept(self):
+        master_data = self.master_combo.currentData()
+        if not master_data or not master_data.get("id"):
+            QMessageBox.warning(self, "Добавление времени", "Выберите мастера.")
+            return
+
+        start_dt = self.start_edit.dateTime()
+        if start_dt < QDateTime.currentDateTime():
+            QMessageBox.warning(
+                self,
+                "Добавление времени",
+                "Нельзя создать слот в прошлом. Выберите другое время.",
+            )
+            return
+
+        seconds = start_dt.time().second()
+        if seconds:
+            start_dt = start_dt.addSecs(-seconds)
+
+        end_dt = start_dt.addSecs(int(self.duration_min) * 60)
+
+        self._result = {
+            "master": master_data,
+            "master_id": master_data.get("id"),
+            "start_ts": start_dt,
+            "end_ts": end_dt,
+        }
+
+        super().accept()
+
+    def get_data(self):
+        return self._result
+
+
 def create_service_via_dialog(parent):
     dialog = CreateServiceDialog(parent)
     if dialog.exec() != QDialog.Accepted:
@@ -887,6 +1028,103 @@ def create_service_via_dialog(parent):
         "duration_min": data.get("duration_min"),
         "base_price": data.get("base_price"),
     }
+
+
+def create_slot_for_service(context):
+    if context is None:
+        return False
+
+    salon_id = context.get("salon_id")
+    if salon_id is None and isinstance(context.get("salon"), dict):
+        salon_id = context["salon"].get("id")
+
+    service_id = context.get("service_id")
+    if service_id is None and isinstance(context.get("service"), dict):
+        service_id = context["service"].get("id")
+
+    if not salon_id or not service_id:
+        QMessageBox.warning(
+            main,
+            "Добавление времени",
+            "Не удалось определить салон или услугу для создания слота.",
+        )
+        return False
+
+    if context.get("duration_min") is None:
+        duration_query = execute_select(
+            "SELECT duration_min FROM services WHERE id = ?",
+            [service_id],
+            "Получение длительности услуги",
+        )
+        if duration_query is not None and duration_query.next():
+            context["duration_min"] = duration_query.value(0)
+
+    masters = fetch_masters_for_salon(salon_id)
+    if not masters:
+        QMessageBox.information(
+            main,
+            "Добавление времени",
+            "В салоне нет активных мастеров. Добавьте мастеров прежде, чем создавать время.",
+        )
+        return False
+
+    dialog = CreateSlotDialog(main, context=context, masters=masters)
+    if dialog.exec() != QDialog.Accepted:
+        return False
+
+    slot_data = dialog.get_data() or {}
+    master = slot_data.get("master") or {}
+    master_id = slot_data.get("master_id")
+    start_dt = slot_data.get("start_ts")
+    end_dt = slot_data.get("end_ts")
+    if not master_id or start_dt is None or end_dt is None:
+        QMessageBox.warning(
+            main,
+            "Добавление времени",
+            "Недостаточно данных для сохранения нового слота.",
+        )
+        return False
+
+    query = QSqlQuery()
+    query.prepare(
+        "INSERT INTO schedule_slots (master_id, start_ts, end_ts, is_booked) VALUES (?, ?, ?, FALSE)"
+    )
+    query.addBindValue(master_id)
+    query.addBindValue(start_dt)
+    query.addBindValue(end_dt)
+
+    if not query.exec():
+        show_db_error(query, "Добавление нового слота в расписание")
+        return False
+
+    start_text = format_cell(start_dt)
+    end_text = format_cell(end_dt)
+    time_text = start_text
+    if end_text and end_text != start_text:
+        time_text = f"{start_text} – {end_text}"
+
+    service_name = context.get("service_name") or context.get("name")
+    salon_name = context.get("salon_name") or context.get("salon")
+    master_name = master.get("full_name")
+
+    message_parts = []
+    if service_name:
+        message_parts.append(f"Для услуги «{service_name}»")
+    else:
+        message_parts.append("Создан свободный слот")
+
+    message_parts.append(f"назначено время {time_text}.")
+
+    if master_name:
+        message_parts.append(f"Мастер: {master_name}.")
+
+    if salon_name:
+        message_title = f"Салон «{salon_name}»"
+    else:
+        message_title = "Время добавлено"
+
+    QMessageBox.information(main, message_title, " ".join(message_parts))
+    return True
 
 
 def choose_slot_for_booking(slots, salon_name="", service_name=""):
@@ -1102,6 +1340,7 @@ def load_salon_services():
                     "city": city,
                     "service_name": query.value("service_name"),
                     "price": query.value("price"),
+                    "duration_min": query.value("duration_min"),
                 }
             )
     populate_table(table, headers, rows, payloads)
@@ -1189,6 +1428,8 @@ def configure_role_controls(role):
 
     if hasattr(main, "btnAddService"):
         main.btnAddService.setEnabled(manage_services)
+    if hasattr(main, "btnAddSlot"):
+        main.btnAddSlot.setEnabled(manage_services)
     if hasattr(main, "btnDeleteService"):
         main.btnDeleteService.setEnabled(manage_services)
     if hasattr(main, "btnSaveService"):
@@ -1627,11 +1868,73 @@ def on_add_service():
     load_salon_services()
     load_catalog()
 
+    slot_context = {
+        "salon_id": salon.get("id"),
+        "salon_name": salon.get("name"),
+        "service_id": service.get("id"),
+        "service_name": service.get("name"),
+        "duration_min": service.get("duration_min"),
+    }
+
+    ask_slot = QMessageBox.question(
+        main,
+        "Добавление времени",
+        (
+            f"Создать свободное время для услуги «{service.get('name')}»\n"
+            f"в салоне «{salon.get('name')}» прямо сейчас?"
+        ),
+        QMessageBox.Yes | QMessageBox.No,
+        QMessageBox.Yes,
+    )
+
+    if ask_slot == QMessageBox.Yes:
+        create_slot_for_service(slot_context)
+
     QMessageBox.information(
         main,
         "Услуга добавлена",
         f"Услуга «{service.get('name')}» добавлена в салон «{salon.get('name')}».",
     )
+
+
+def on_add_slot():
+    table = getattr(main, "tblServices", None)
+    selection = get_selected_row_payload(table)
+    if not selection:
+        QMessageBox.information(
+            main,
+            "Добавление времени",
+            "Выберите услугу в таблице салона, для которой нужно создать время.",
+        )
+        return
+
+    _, payload = selection
+    salon_id = payload.get("salon_id")
+    service_id = payload.get("service_id")
+    if not salon_id or not service_id:
+        QMessageBox.warning(
+            main,
+            "Добавление времени",
+            "Не удалось определить выбранную услугу.",
+        )
+        return
+
+    duration = payload.get("duration_min")
+    if duration is not None:
+        try:
+            duration = int(duration)
+        except (TypeError, ValueError):
+            duration = None
+
+    context = {
+        "salon_id": salon_id,
+        "salon_name": payload.get("salon_name"),
+        "service_id": service_id,
+        "service_name": payload.get("service_name"),
+        "duration_min": duration,
+    }
+
+    create_slot_for_service(context)
 
 
 def on_delete_service():
@@ -1827,6 +2130,9 @@ if hasattr(main, "btnResetInfo"):
 
 if hasattr(main, "btnAddService"):
     main.btnAddService.clicked.connect(on_add_service)
+
+if hasattr(main, "btnAddSlot"):
+    main.btnAddSlot.clicked.connect(on_add_slot)
 
 if hasattr(main, "btnDeleteService"):
     main.btnDeleteService.clicked.connect(on_delete_service)

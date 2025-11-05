@@ -334,6 +334,18 @@
           </widget>
          </item>
          <item>
+          <widget class="QPushButton" name="btnAddSlot">
+           <property name="font">
+            <font>
+             <pointsize>14</pointsize>
+            </font>
+           </property>
+           <property name="text">
+            <string>Добавить время</string>
+           </property>
+          </widget>
+         </item>
+         <item>
           <widget class="QPushButton" name="btnDeleteService">
            <property name="font">
             <font>
