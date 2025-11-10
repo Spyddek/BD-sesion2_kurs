@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QLabel,
     QDateTimeEdit,
+    QCheckBox,
 )
 from PySide6.QtUiTools import QUiLoader
 from PySide6.QtCore import QFile, QDate, QTime, QDateTime, Qt
@@ -44,6 +45,12 @@ ROLE_CONFIGS = {
     "salon": {"tabs": ("salon", "catalog"), "title": "Smart-SPA — Салон"},
     "admin": {"tabs": ("admin",), "title": "Smart-SPA — Администратор"},
 }
+
+DEFAULT_ROLE_DEFINITIONS = (
+    ("client", "Клиент"),
+    ("salon", "Салон"),
+    ("admin", "Администратор"),
+)
 
 current_user = None
 current_role = None
@@ -286,9 +293,15 @@ def cleanup_client_related_data(user_id):
     ):
         return False
 
+    cancellation_function = (
+        "отменить_запись"
+        if function_exists("отменить_запись", 1)
+        else "cancel_appointment"
+    )
+
     for appointment_id in cancellable_ids:
         query = QSqlQuery()
-        query.prepare("SELECT cancel_appointment(?)")
+        query.prepare(f"SELECT {cancellation_function}(?)")
         query.addBindValue(appointment_id)
         if not query.exec():
             show_db_error(query, "Отмена записей пользователя")
@@ -328,6 +341,67 @@ def get_table_columns(table_name):
             if column_name:
                 columns.add(str(column_name).lower())
     return columns
+
+
+@lru_cache(maxsize=None)
+def table_exists(table_name):
+    if not table_name:
+        return False
+    sql = (
+        "SELECT 1 FROM information_schema.tables "
+        "WHERE table_schema = current_schema() AND table_name = ? LIMIT 1"
+    )
+    query = execute_select(
+        sql,
+        [table_name],
+        context=f"Проверка наличия таблицы {table_name}",
+    )
+    return bool(query and query.next())
+
+
+@lru_cache(maxsize=None)
+def function_exists(function_name, arg_count=None):
+    if not function_name:
+        return False
+    normalized = function_name.strip().casefold()
+    sql = (
+        "SELECT 1 FROM pg_catalog.pg_proc p "
+        "JOIN pg_namespace n ON n.oid = p.pronamespace "
+        "WHERE n.nspname = current_schema() AND p.proname = ?"
+    )
+    params = [normalized]
+    if arg_count is not None:
+        sql += " AND p.pronargs = ?"
+        params.append(int(arg_count))
+    sql += " LIMIT 1"
+    query = execute_select(
+        sql,
+        params,
+        context=f"Проверка наличия функции {function_name}",
+    )
+    return bool(query and query.next())
+
+
+def ensure_default_roles():
+    if function_exists("create_role", 2):
+        for code, name in DEFAULT_ROLE_DEFINITIONS:
+            query = QSqlQuery()
+            query.prepare("SELECT create_role(?, ?)")
+            query.addBindValue(code)
+            query.addBindValue(name)
+            if not query.exec():
+                show_db_error(query, f"Создание роли {code}")
+                return False
+        return True
+
+    sql = (
+        "INSERT INTO roles(code, name) VALUES (?, ?) "
+        "ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name"
+    )
+    for code, name in DEFAULT_ROLE_DEFINITIONS:
+        if not execute_action(sql, [code, name], f"Добавление роли {code}"):
+            return False
+    return True
 
 
 def build_status_select_clause(alias="status_display"):
@@ -674,7 +748,12 @@ def fetch_available_slots(salon_id, limit=20):
 
 
 def fetch_salons():
-    if current_role == "salon" and current_user:
+    if (
+        current_role == "salon"
+        and current_user
+        and current_user.get("id") is not None
+        and table_exists("salon_users")
+    ):
         sql = (
             "SELECT s.id, s.name, s.city "
             "FROM salons s "
@@ -682,7 +761,11 @@ def fetch_salons():
             "WHERE su.user_id = ? "
             "ORDER BY s.name"
         )
-        query = execute_select(sql, [current_user.get("id")], context="Загрузка списка салонов")
+        query = execute_select(
+            sql,
+            [current_user.get("id")],
+            context="Загрузка списка салонов",
+        )
     else:
         sql = "SELECT id, name, city FROM salons ORDER BY name"
         query = execute_select(sql, context="Загрузка списка салонов")
@@ -726,29 +809,6 @@ def fetch_available_services_for_salon(salon_id):
 def fetch_masters_for_salon(salon_id):
     if salon_id is None:
         return []
-def fetch_masters_for_salon_and_service(salon_id, service_id):
-    if salon_id is None or service_id is None:
-        return []
-    sql = (
-        "SELECT m.id, m.full_name, m.specialization "
-        "FROM masters m "
-        "JOIN master_services ms ON ms.master_id = m.id "
-        "WHERE m.salon_id = ? AND m.active = TRUE AND ms.service_id = ? "
-        "ORDER BY m.full_name"
-    )
-    query = execute_select(sql, [salon_id, service_id], "Загрузка мастеров для услуги салона")
-    masters = []
-    if query is not None:
-        while query.next():
-            masters.append(
-                {
-                    "id": query.value("id"),
-                    "full_name": query.value("full_name"),
-                    "specialization": query.value("specialization"),
-                }
-            )
-    return masters
-
 
     sql = (
         "SELECT id, full_name, specialization "
@@ -768,6 +828,40 @@ def fetch_masters_for_salon_and_service(salon_id, service_id):
                 }
             )
     return masters
+
+
+def fetch_masters_for_salon_and_service(salon_id, service_id):
+    if salon_id is None:
+        return []
+
+    masters = []
+    if service_id is not None and table_exists("master_services"):
+        sql = (
+            "SELECT m.id, m.full_name, m.specialization "
+            "FROM masters m "
+            "JOIN master_services ms ON ms.master_id = m.id "
+            "WHERE m.salon_id = ? AND m.active = TRUE AND ms.service_id = ? "
+            "ORDER BY m.full_name"
+        )
+        query = execute_select(
+            sql,
+            [salon_id, service_id],
+            "Загрузка мастеров для услуги салона",
+        )
+        if query is not None:
+            while query.next():
+                masters.append(
+                    {
+                        "id": query.value("id"),
+                        "full_name": query.value("full_name"),
+                        "specialization": query.value("specialization"),
+                    }
+                )
+
+    if masters:
+        return masters
+
+    return fetch_masters_for_salon(salon_id)
 
 
 def format_price(value):
@@ -1063,6 +1157,9 @@ class AssignMastersDialog(QDialog):
 
 
 def fetch_assigned_master_ids(salon_id, service_id):
+    if not table_exists("master_services"):
+        return []
+
     sql = (
         "SELECT ms.master_id "
         "FROM master_services ms "
@@ -1079,15 +1176,21 @@ def fetch_assigned_master_ids(salon_id, service_id):
 
 
 def save_master_assignments(salon_id, service_id, master_ids):
-    # Simple approach: replace assignments
-    if not execute_action("DELETE FROM master_services WHERE master_id IN (SELECT id FROM masters WHERE salon_id = ?) AND service_id = ?",
-                          [salon_id, service_id],
-                          "Очистка старых назначений мастеров"):
+    if not table_exists("master_services"):
+        return True
+
+    if not execute_action(
+        "DELETE FROM master_services WHERE master_id IN (SELECT id FROM masters WHERE salon_id = ?) AND service_id = ?",
+        [salon_id, service_id],
+        "Очистка старых назначений мастеров",
+    ):
         return False
     for mid in master_ids:
-        if not execute_action("INSERT INTO master_services(master_id, service_id) VALUES (?, ?)",
-                              [mid, service_id],
-                              "Назначение мастера на услугу"):
+        if not execute_action(
+            "INSERT INTO master_services(master_id, service_id) VALUES (?, ?)",
+            [mid, service_id],
+            "Назначение мастера на услугу",
+        ):
             return False
     return True
 
@@ -1105,6 +1208,14 @@ def on_assign_masters_button():
 
 
 def on_assign_masters_to_service(salon, service):
+    if not table_exists("master_services"):
+        QMessageBox.information(
+            main,
+            "Назначение мастеров",
+            "Текущая структура базы данных не поддерживает назначение мастеров на услуги.",
+        )
+        return
+
     if not salon or not service or not salon.get("id") or not service.get("id"):
         QMessageBox.warning(main, "Назначение мастеров", "Не удалось определить салон или услугу.")
         return
@@ -1222,19 +1333,14 @@ def create_slot_for_service(context):
 
     masters = fetch_masters_for_salon_and_service(salon_id, service_id)
     if not masters:
+        masters = fetch_masters_for_salon(salon_id)
+
+    if not masters:
         QMessageBox.information(
             main,
             "Добавление времени",
-            "Ни один мастер не назначен на эту услугу. Сначала назначьте мастера на услугу.",
+            "В салоне нет активных мастеров. Добавьте мастеров прежде, чем создавать время.",
         )
-        on_assign_masters_to_service({"id": salon_id, "name": context.get("salon_name")}, {"id": service_id, "name": context.get("service_name")})
-        masters = fetch_masters_for_salon_and_service(salon_id, service_id)
-        if not masters:
-            QMessageBox.information(
-                main,
-                "Добавление времени",
-                "В салоне нет активных мастеров. Добавьте мастеров прежде, чем создавать время.",
-            )
         return False
 
     dialog = CreateSlotDialog(main, context=context, masters=masters)
@@ -1426,8 +1532,14 @@ def on_book_now():
     if slot_info is None:
         return
 
+    booking_function = (
+        "забронировать_приём"
+        if function_exists("забронировать_приём", 5)
+        else "book_appointment"
+    )
+
     query = QSqlQuery()
-    query.prepare("SELECT book_appointment(?, ?, ?, ?, ?)")
+    query.prepare(f"SELECT {booking_function}(?, ?, ?, ?, ?)")
     query.addBindValue(current_user["id"])
     query.addBindValue(salon_id)
     query.addBindValue(slot_info["master_id"])
@@ -1607,6 +1719,11 @@ def configure_role_controls(role):
         can_edit_profile = client_only and current_user is not None and current_user.get("id")
         main.btnResetInfo.setEnabled(bool(can_edit_profile))
 
+    if hasattr(main, "btnAssignMasters"):
+        supports_assignments = table_exists("master_services")
+        main.btnAssignMasters.setEnabled(manage_services and supports_assignments)
+        main.btnAssignMasters.setVisible(supports_assignments)
+
     if hasattr(main, "btnDeleteUser"):
         main.btnDeleteUser.setEnabled(is_admin)
     if hasattr(main, "btnApproveReview"):
@@ -1713,6 +1830,9 @@ app = QApplication(sys.argv)
 if not connect_db():
     sys.exit(1)
 
+if not ensure_default_roles():
+    sys.exit(1)
+
 login = load_ui("ui/LoginWindow.ui")
 main = load_ui("ui/MainWindow.ui")
 
@@ -1810,8 +1930,14 @@ def on_cancel_booking():
     if confirm != QMessageBox.Yes:
         return
 
+    cancellation_function = (
+        "отменить_запись"
+        if function_exists("отменить_запись", 1)
+        else "cancel_appointment"
+    )
+
     query = QSqlQuery()
-    query.prepare("SELECT cancel_appointment(?)")
+    query.prepare(f"SELECT {cancellation_function}(?)")
     query.addBindValue(appointment_id)
 
     if not query.exec():
